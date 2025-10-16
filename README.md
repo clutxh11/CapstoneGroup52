@@ -186,12 +186,38 @@
 
 **Next Immediate Actions:**
 
+### PDP Preparation (Due Oct 20)
+
+**Samuel (Project Manager):**
+
 1. Submit design log website link
-2. Complete motor mount systems CAD design (Ameen & Joseph)
-3. Finalize CAD models for PDP presentation
-4. Complete component research (Chanuth & Adesh)
-5. Create decision matrix for design selection
-6. Prepare for Preliminary Design Presentation (Oct 20)
+2. Gather wheelchair basketball statistics and player testimonials
+3. Research competitive wheelchair specifications (speed, dimensions)
+4. Prepare market analysis for adaptive sports equipment
+
+**Ameen & Joseph (CAD Team):**
+
+1. Complete motor mount systems CAD design
+2. Provide rendered images of preliminary design for PDP
+3. Create engineering drawings with key dimensions
+4. Document alternate design concepts considered
+5. Generate comparison visualizations (traditional vs. our design)
+
+**Chanuth & Adesh (Components Team):**
+
+1. Complete component research and selection
+2. Provide component list with part numbers and specifications
+3. Create cost breakdown and selection rationale
+4. Conduct power consumption analysis for 2-hour battery life
+5. Research safety standards compliance
+
+**All Team Members:**
+
+1. Extract and summarize 4 alternate design solutions from research
+2. Create complete decision matrix with weighted scoring
+3. Identify top 3 patents with numbers, titles, and impact analysis
+4. Prepare patent landscape assessment
+5. Finalize Preliminary Design Presentation document
 
 ---
 
