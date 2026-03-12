@@ -23,6 +23,10 @@ void sensor_getPlatformZeroRad(float* roll_zero, float* pitch_zero, float* yaw_z
 // Get last IMU B euler angles in radians (for roll/pitch/yaw -> motor mapping).
 void sensor_getImuB_EulerRad(float* roll_rad, float* pitch_rad, float* yaw_rad);
 
+// Get IMU B full state for LQR when B is used as platform: [roll, pitch, yaw] in rad, [omega_roll, omega_pitch, omega_yaw] in rad/s (bias-corrected).
+void sensor_getImuB_StateRad(float* roll_rad, float* pitch_rad, float* yaw_rad,
+                             float* omega_roll, float* omega_pitch, float* omega_yaw);
+
 // Read control axis (rad) from IMU B. Updates IMU B display. Returns true if new data was read.
 bool sensor_readControlAxis(float* axis_rad);
 

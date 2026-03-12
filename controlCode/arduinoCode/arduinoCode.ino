@@ -2,11 +2,15 @@
  * Modular dual-IMU + ODrive: Motor 1=roll, Motor 2=pitch, Motor 3=yaw (IMU B).
  * Positive angle -> CW torque; negative angle -> CCW.
  *
- * USE_USER_LEAN_REFERENCE: 1 = LQR reference from IMU B (user lean); 0 = chassis only, ref = upright (0,0,0).
+ * USE_USER_LEAN_REFERENCE: 1 = LQR reference from user-lean IMU; 0 = chassis only, ref = upright (0,0,0).
+ * PLATFORM_USE_IMU_B: 1 = platform state from IMU B (reference from IMU A when user lean); 0 = platform from A (ref from B when user lean).
+ * IGNORE_YAW_IN_CHASSIS: 1 = in chassis-only mode, ignore yaw (ref = current yaw/omega_yaw so only roll/pitch regulated to 0).
  * INVERT_ROLL: 1 = flip sign of roll (state and ref) so positive roll direction matches hardware.
  * RUN_MOTOR_SPIN_CHECK: 1 = at startup, spin each motor + then - to verify direction vs simulation.
  */
 #define USE_USER_LEAN_REFERENCE 0
+#define PLATFORM_USE_IMU_B 1
+#define IGNORE_YAW_IN_CHASSIS 1
 #define INVERT_ROLL 1
 #define RUN_MOTOR_SPIN_CHECK 0
 
@@ -104,20 +108,31 @@ void setup() {
         motor_sendVelocities(phases[p].v1, phases[p].v2, phases[p].v3);
         if (millis() - last_print >= PRINT_INTERVAL_MS) {
           last_print = millis();
-          float x[6];
+          const float rad2deg = 180.0f / PI;
+          float x[6], roll_z, pitch_z, yaw_z;
+#if PLATFORM_USE_IMU_B
+          sensor_getImuB_StateRad(&x[0], &x[1], &x[2], &x[3], &x[4], &x[5]);
+          float yawB, pitchB, rollB;
+          sensor_getImuB_EulerDeg(&yawB, &pitchB, &rollB);
+          float br0, bp0, by0;
+          sensor_getEulerZeroRad(&br0, &bp0, &by0);
+          roll_z  = rollB  - (br0 * rad2deg);
+          pitch_z = pitchB - (bp0 * rad2deg);
+          yaw_z   = yawB   - (by0 * rad2deg);
+#else
           sensor_getImuA_StateRad(&x[0], &x[1], &x[2], &x[3], &x[4], &x[5]);
           float yawA, pitchA, rollA;
           sensor_getImuA_EulerDeg(&yawA, &pitchA, &rollA);
           float pr0, pp0, py0;
           sensor_getPlatformZeroRad(&pr0, &pp0, &py0);
-          const float rad2deg = 180.0f / PI;
-          float rollA_z  = rollA  - (pr0 * rad2deg);
-          float pitchA_z = pitchA - (pp0 * rad2deg);
-          float yawA_z   = yawA   - (py0 * rad2deg);
-#if INVERT_ROLL
-          rollA_z = -rollA_z;
+          roll_z  = rollA  - (pr0 * rad2deg);
+          pitch_z = pitchA - (pp0 * rad2deg);
+          yaw_z   = yawA   - (py0 * rad2deg);
 #endif
-          printRow(rollA_z, pitchA_z, yawA_z, x[3], x[4], x[5], 0.0f, 0.0f, 0.0f, phases[p].v1, phases[p].v2, phases[p].v3);
+#if INVERT_ROLL
+          roll_z = -roll_z;
+#endif
+          printRow(roll_z, pitch_z, yaw_z, x[3], x[4], x[5], 0.0f, 0.0f, 0.0f, phases[p].v1, phases[p].v2, phases[p].v3);
         }
         delay(10);
       }
@@ -139,6 +154,14 @@ void setup() {
 #else
   Serial.println("Roll: normal sign");
 #endif
+#if !USE_USER_LEAN_REFERENCE && IGNORE_YAW_IN_CHASSIS
+  Serial.println("Chassis: yaw ignored (only roll/pitch regulated to 0)");
+#endif
+#if PLATFORM_USE_IMU_B
+  Serial.println("Platform: IMU B (reference from IMU A when user lean)");
+#else
+  Serial.println("Platform: IMU A (reference from IMU B when user lean)");
+#endif
   printHeader();
 }
 
@@ -151,17 +174,34 @@ void loop() {
   sensor_readImuA(&dummy);           // update IMU A display
   sensor_readControlAxis(&dummy);     // update IMU B (roll, pitch, yaw) and display
 
-  // LQR: state x from IMU A (platform); x_ref = user lean (IMU B) or upright (0) per flag.
-  // Subtract zeros so orientation at reset/calibration is (0,0,0).
+  // LQR: state x = platform IMU (A or B per flag); x_ref = user-lean IMU or upright (0).
   float x[6], x_ref[6];
+#if PLATFORM_USE_IMU_B
+  sensor_getImuB_StateRad(&x[0], &x[1], &x[2], &x[3], &x[4], &x[5]);
+  float br0, bp0, by0;
+  sensor_getEulerZeroRad(&br0, &bp0, &by0);
+  x[0] -= br0;
+  x[1] -= bp0;
+  x[2] -= by0;
+#else
   sensor_getImuA_StateRad(&x[0], &x[1], &x[2], &x[3], &x[4], &x[5]);
   float pr0, pp0, py0;
   sensor_getPlatformZeroRad(&pr0, &pp0, &py0);
   x[0] -= pr0;
   x[1] -= pp0;
   x[2] -= py0;
+#endif
 
 #if USE_USER_LEAN_REFERENCE
+#if PLATFORM_USE_IMU_B
+  float rollA, pitchA, yawA;
+  float pr0, pp0, py0;
+  sensor_getImuA_StateRad(&rollA, &pitchA, &yawA, &x_ref[3], &x_ref[4], &x_ref[5]);
+  sensor_getPlatformZeroRad(&pr0, &pp0, &py0);
+  x_ref[0] = rollA - pr0;
+  x_ref[1] = pitchA - pp0;
+  x_ref[2] = yawA - py0;
+#else
   float rollB, pitchB, yawB;
   sensor_getImuB_EulerRad(&rollB, &pitchB, &yawB);
   float br0, bp0, by0;
@@ -169,6 +209,7 @@ void loop() {
   x_ref[0] = rollB - br0;
   x_ref[1] = pitchB - bp0;
   x_ref[2] = yawB - by0;
+#endif
 #else
   x_ref[0] = 0.0f;
   x_ref[1] = 0.0f;
@@ -184,6 +225,11 @@ void loop() {
   x_ref[0] = -x_ref[0];
 #endif
 
+#if !USE_USER_LEAN_REFERENCE && IGNORE_YAW_IN_CHASSIS
+  x_ref[2] = x[2];   // desired yaw = current yaw (no yaw regulation)
+  x_ref[5] = x[5];   // desired omega_yaw = current (no yaw rate damping from ref)
+#endif
+
   float v1, v2, v3, tau_roll, tau_pitch, tau_yaw;
   control_updateLQR(x, x_ref, &v1, &v2, &v3, &tau_roll, &tau_pitch, &tau_yaw);
 
@@ -192,17 +238,28 @@ void loop() {
   static uint32_t last_print = 0;
   if (millis() - last_print > 200) {
     last_print = millis();
+    const float rad2deg = 180.0f / PI;
+    float roll_z, pitch_z, yaw_z;
+#if PLATFORM_USE_IMU_B
+    float yawB, pitchB, rollB;
+    sensor_getImuB_EulerDeg(&yawB, &pitchB, &rollB);
+    float br0, bp0, by0;
+    sensor_getEulerZeroRad(&br0, &bp0, &by0);
+    roll_z  = rollB  - (br0 * rad2deg);
+    pitch_z = pitchB - (bp0 * rad2deg);
+    yaw_z   = yawB   - (by0 * rad2deg);
+#else
     float yawA, pitchA, rollA;
     sensor_getImuA_EulerDeg(&yawA, &pitchA, &rollA);
     float pr0, pp0, py0;
     sensor_getPlatformZeroRad(&pr0, &pp0, &py0);
-    const float rad2deg = 180.0f / PI;
-    float rollA_z  = rollA  - (pr0 * rad2deg);
-    float pitchA_z = pitchA - (pp0 * rad2deg);
-    float yawA_z   = yawA   - (py0 * rad2deg);
-#if INVERT_ROLL
-    rollA_z = -rollA_z;  // display matches what controller sees
+    roll_z  = rollA  - (pr0 * rad2deg);
+    pitch_z = pitchA - (pp0 * rad2deg);
+    yaw_z   = yawA   - (py0 * rad2deg);
 #endif
-    printRow(rollA_z, pitchA_z, yawA_z, x[3], x[4], x[5], tau_roll, tau_pitch, tau_yaw, v1, v2, v3);
+#if INVERT_ROLL
+    roll_z = -roll_z;  // display matches what controller sees
+#endif
+    printRow(roll_z, pitch_z, yaw_z, x[3], x[4], x[5], tau_roll, tau_pitch, tau_yaw, v1, v2, v3);
   }
 }

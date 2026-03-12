@@ -24,6 +24,8 @@ static float roll_zero_rad = 0.0f, pitch_zero_rad = 0.0f, yaw_zero_rad = 0.0f;
 static float platform_roll0_rad = 0.0f, platform_pitch0_rad = 0.0f, platform_yaw0_rad = 0.0f;
 static float platform_omega_roll_bias = 0.0f, platform_omega_pitch_bias = 0.0f, platform_omega_yaw_bias = 0.0f;
 static float rollB_rad = 0.0f, pitchB_rad = 0.0f, yawB_rad = 0.0f;
+static float omega_roll_B = 0.0f, omega_pitch_B = 0.0f, omega_yaw_B = 0.0f;
+static float platform_omega_roll_bias_B = 0.0f, platform_omega_pitch_bias_B = 0.0f, platform_omega_yaw_bias_B = 0.0f;
 static float yawA_deg = 0, pitchA_deg = 0, rollA_deg = 0;
 static float yawB_deg = 0, pitchB_deg = 0, rollB_deg = 0;
 // IMU A 6-state for LQR: roll, pitch, yaw (rad), omega_roll, omega_pitch, omega_yaw (rad/s)
@@ -74,6 +76,7 @@ bool sensor_init(void) {
     return false;
   }
   imuB.enableRotationVector(20);
+  imuB.enableGyro(20);
   delay(100);
   return true;
 }
@@ -83,8 +86,10 @@ void sensor_calibrateZero(void) {
   double sum_roll = 0.0, sum_pitch = 0.0, sum_yaw = 0.0;
   double sum_roll_a = 0.0, sum_pitch_a = 0.0, sum_yaw_a = 0.0;
   double sum_omega_r_a = 0.0, sum_omega_p_a = 0.0, sum_omega_y_a = 0.0;
+  double sum_omega_r_b = 0.0, sum_omega_p_b = 0.0, sum_omega_y_b = 0.0;
   uint32_t count = 0;
   uint32_t count_a = 0;
+  uint32_t count_b_gyro = 0;
 
   while (millis() - t0 < (uint32_t)IMU_ZERO_CAL_MS) {
     float axis_rad;
@@ -92,7 +97,11 @@ void sensor_calibrateZero(void) {
       sum_roll  += rollB_rad;
       sum_pitch += pitchB_rad;
       sum_yaw   += yawB_rad;
+      sum_omega_r_b += omega_roll_B;
+      sum_omega_p_b += omega_pitch_B;
+      sum_omega_y_b += omega_yaw_B;
       count++;
+      count_b_gyro++;
     }
     if (sensor_readImuA(&axis_rad)) {
       sum_roll_a   += rollA_rad;
@@ -110,6 +119,11 @@ void sensor_calibrateZero(void) {
     roll_zero_rad  = (float)(sum_roll  / (double)count);
     pitch_zero_rad = (float)(sum_pitch / (double)count);
     yaw_zero_rad   = (float)(sum_yaw   / (double)count);
+  }
+  if (count_b_gyro > 0) {
+    platform_omega_roll_bias_B  = (float)(sum_omega_r_b / (double)count_b_gyro);
+    platform_omega_pitch_bias_B = (float)(sum_omega_p_b / (double)count_b_gyro);
+    platform_omega_yaw_bias_B   = (float)(sum_omega_y_b / (double)count_b_gyro);
   }
   if (count_a > 0) {
     platform_roll0_rad  = (float)(sum_roll_a  / (double)count_a);
@@ -138,6 +152,16 @@ void sensor_getImuB_EulerRad(float* roll_rad, float* pitch_rad, float* yaw_rad) 
   *roll_rad  = rollB_rad;
   *pitch_rad = pitchB_rad;
   *yaw_rad   = yawB_rad;
+}
+
+void sensor_getImuB_StateRad(float* roll_rad, float* pitch_rad, float* yaw_rad,
+                             float* omega_roll, float* omega_pitch, float* omega_yaw) {
+  *roll_rad  = rollB_rad;
+  *pitch_rad = pitchB_rad;
+  *yaw_rad   = yawB_rad;
+  *omega_roll  = omega_roll_B  - platform_omega_roll_bias_B;
+  *omega_pitch = omega_pitch_B - platform_omega_pitch_bias_B;
+  *omega_yaw   = omega_yaw_B   - platform_omega_yaw_bias_B;
 }
 
 float sensor_getAxisZero(void) {
@@ -207,6 +231,9 @@ bool sensor_readControlAxis(float* axis_rad) {
   rollB_rad  = roll_rad;
   pitchB_rad = pitch_rad;
   yawB_rad   = yaw_rad;
+  omega_roll_B  = imuB.getGyroX();
+  omega_pitch_B = imuB.getGyroY();
+  omega_yaw_B   = imuB.getGyroZ();
   quatToEulerDeg(qw, qx, qy, qz, &yawB_deg, &pitchB_deg, &rollB_deg);
   switch (AXIS_FOR_CONTROL) {
     case AXIS_ROLL:  last_control_axis_rad = roll_rad;  break;
