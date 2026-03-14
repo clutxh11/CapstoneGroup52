@@ -27,8 +27,9 @@ static float last_sent_v1 = SENTINEL_NO_SEND;
 static float last_sent_v2 = SENTINEL_NO_SEND;
 static float last_sent_v3 = SENTINEL_NO_SEND;
 
-// Encoder velocities in same frame as v1,v2,v3 (logical); updated by motor_requestEncoderFeedback().
+// Encoder velocities and positions in same frame as v1,v2,v3 (logical); updated by motor_requestEncoderFeedback().
 static float encoder_vel[3] = { 0.0f, 0.0f, 0.0f };
+static float encoder_pos[3] = { 0.0f, 0.0f, 0.0f };
 
 static FlexCAN_T4<CAN1, RX_SIZE_256, TX_SIZE_16> can_intf;
 
@@ -164,16 +165,28 @@ void motor_getLastSent(float* v1, float* v2, float* v3) {
 
 void motor_requestEncoderFeedback(void) {
   Get_Encoder_Estimates_msg_t fb;
-  if (odrv0.getFeedback(fb, ENCODER_REQUEST_TIMEOUT_MS))
+  if (odrv0.getFeedback(fb, ENCODER_REQUEST_TIMEOUT_MS)) {
     encoder_vel[0] = -fb.Vel_Estimate;  // logical frame (we send -v1 to node0)
-  if (odrv1.getFeedback(fb, ENCODER_REQUEST_TIMEOUT_MS))
+    encoder_pos[0] = -fb.Pos_Estimate;
+  }
+  if (odrv1.getFeedback(fb, ENCODER_REQUEST_TIMEOUT_MS)) {
     encoder_vel[1] = -fb.Vel_Estimate;  // logical frame (we send -v2 to node1)
-  if (odrv2.getFeedback(fb, ENCODER_REQUEST_TIMEOUT_MS))
+    encoder_pos[1] = -fb.Pos_Estimate;
+  }
+  if (odrv2.getFeedback(fb, ENCODER_REQUEST_TIMEOUT_MS)) {
     encoder_vel[2] =  fb.Vel_Estimate;  // logical frame (we send +v3 to node2)
+    encoder_pos[2] =  fb.Pos_Estimate;
+  }
 }
 
 void motor_getEncoderVelocities(float* v1, float* v2, float* v3) {
   *v1 = encoder_vel[0];
   *v2 = encoder_vel[1];
   *v3 = encoder_vel[2];
+}
+
+void motor_getEncoderPositions(float* p1, float* p2, float* p3) {
+  *p1 = encoder_pos[0];
+  *p2 = encoder_pos[1];
+  *p3 = encoder_pos[2];
 }

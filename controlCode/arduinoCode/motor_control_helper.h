@@ -32,4 +32,7 @@ void motor_requestEncoderFeedback(void);
 // Last encoder velocity per motor in same frame as commands (v1, v2, v3). Call after motor_requestEncoderFeedback().
 void motor_getEncoderVelocities(float* v1, float* v2, float* v3);
 
+// Last encoder position per motor in revolutions [rev], same sign convention as velocities. Call after motor_requestEncoderFeedback().
+void motor_getEncoderPositions(float* p1, float* p2, float* p3);
+
 #endif // MOTOR_CONTROL_HELPER_H

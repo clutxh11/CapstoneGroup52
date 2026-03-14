@@ -46,6 +46,7 @@
 #define POT_PIN_VEL_MAX    27
 #define POT_PIN_M3        38   // third pot: motor 3 command in stiction measurement mode
 #define POT_ANALOG_MAX     1023.0f   // 10-bit ADC; use 4095.0f for 12-bit if needed
+#define POT_DEADZONE       100       // ADC counts below this treated as 0 to avoid noise at zero
 #define VEL_MAX_LOW        0.0f
 #define VEL_MAX_HIGH       5.0f
 // Stiction measurement: pot range up to 5 in one direction.
@@ -59,6 +60,9 @@
 #define STICTION_MIN_V1    0.22f
 #define STICTION_MIN_V2    0.25f
 #define STICTION_MIN_V3    0.20f
+
+// How often we send state + encoder position to serial (ms). Sets effective encoder feedback rate (e.g. 50 -> 20 Hz).
+#define SERIAL_PRINT_INTERVAL_MS  50
 
 #include "sensor_helper.h"
 #include "control_helper.h"
@@ -75,14 +79,43 @@ static float applyManualStiction(float v_cmd, float min_mag) {
 }
 
 static void printHeader(void) {
-  Serial.println("IMU_A: Roll   Pitch  Yaw   | omega_R   omega_P   omega_Y (rad/s) | tau_R   tau_P   tau_Y  | n0 n1 n2  | v1    v2    v3  | e1    e2    e3  | scale  max_vel");
+  Serial.println("IMU_A: Roll   Pitch  Yaw   | omega_R   omega_P   omega_Y (rad/s) | tau_R   tau_P   tau_Y  | n0 n1 n2  | v1    v2    v3  | e1    e2    e3  | p1    p2    p3 (rev)");
+}
+
+static void printRow(float rollA, float pitchA, float yawA, float omega_r, float omega_p, float omega_y, float tau_r, float tau_p, float tau_y, float v1, float v2, float v3, float e1, float e2, float e3, float p1, float p2, float p3) {
+  Serial.print(rollA, 2);  Serial.print(" ");
+  Serial.print(pitchA, 2); Serial.print(" ");
+  Serial.print(yawA, 2);  Serial.print("  | ");
+  Serial.print(omega_r, 4); Serial.print(" ");
+  Serial.print(omega_p, 4); Serial.print(" ");
+  Serial.print(omega_y, 4); Serial.print("  | ");
+  Serial.print(tau_r, 3); Serial.print(" ");
+  Serial.print(tau_p, 3); Serial.print(" ");
+  Serial.print(tau_y, 3); Serial.print("  | ");
+  Serial.print(motor_isNodePresent(0) ? "1" : "0"); Serial.print(" ");
+  Serial.print(motor_isNodePresent(1) ? "1" : "0"); Serial.print(" ");
+  Serial.print(motor_isNodePresent(2) ? "1" : "0"); Serial.print("  | ");
+  Serial.print(v1, 3); Serial.print(" ");
+  Serial.print(v2, 3); Serial.print(" ");
+  Serial.print(v3, 3); Serial.print("  | ");
+  Serial.print(e1, 3); Serial.print(" ");
+  Serial.print(e2, 3); Serial.print(" ");
+  Serial.print(e3, 3); Serial.print("  | ");
+  Serial.print(p1, 4); Serial.print(" ");
+  Serial.print(p2, 4); Serial.print(" ");
+  Serial.println(p3, 4);
+}
+
+// Normalize pot ADC to 0..1 with deadzone at zero (raw <= POT_DEADZONE -> 0).
+static float potNormalize(int raw) {
+  if (raw <= POT_DEADZONE) return 0.0f;
+  float n = (float)(raw - POT_DEADZONE) / (POT_ANALOG_MAX - (float)POT_DEADZONE);
+  return n > 1.0f ? 1.0f : n;
 }
 
 // Map ADC (0..POT_ANALOG_MAX) to angle [rad] for testing mode. Range 0..±TESTING_ANGLE_MAX_RAD per TESTING_POT_NEGATIVE.
 static float potToTestingAngle(int raw) {
-  float n = (float)raw / POT_ANALOG_MAX;
-  if (n < 0.0f) n = 0.0f;
-  if (n > 1.0f) n = 1.0f;
+  float n = potNormalize(raw);
 #if TESTING_POT_NEGATIVE
   return -n * TESTING_ANGLE_MAX_RAD;
 #else
@@ -94,9 +127,7 @@ static float potToTestingAngle(int raw) {
 // Map ADC (0..POT_ANALOG_MAX) to velocity for stiction measurement.
 // Range is 0..±STICTION_POT_RANGE depending on STICTION_POT_NEGATIVE.
 static float potToStictionVel(int raw) {
-  float n = (float)raw / POT_ANALOG_MAX;  // 0..1
-  if (n < 0.0f) n = 0.0f;
-  if (n > 1.0f) n = 1.0f;
+  float n = potNormalize(raw);
 #if STICTION_POT_NEGATIVE
   return -n * STICTION_POT_RANGE;   // 0 .. -range
 #else
@@ -120,29 +151,6 @@ static void printStictionRow(float v1, float v2, float v3) {
   Serial.println(motor_isNodePresent(2) ? "1" : "0");
 }
 #endif // STICTION_MEASUREMENT_MODE
-
-static void printRow(float rollA, float pitchA, float yawA, float omega_r, float omega_p, float omega_y, float tau_r, float tau_p, float tau_y, float v1, float v2, float v3, float e1, float e2, float e3, float vel_scale, float vel_max) {
-  Serial.print(rollA, 2);  Serial.print(" ");
-  Serial.print(pitchA, 2); Serial.print(" ");
-  Serial.print(yawA, 2);  Serial.print("  | ");
-  Serial.print(omega_r, 4); Serial.print(" ");
-  Serial.print(omega_p, 4); Serial.print(" ");
-  Serial.print(omega_y, 4); Serial.print("  | ");
-  Serial.print(tau_r, 3); Serial.print(" ");
-  Serial.print(tau_p, 3); Serial.print(" ");
-  Serial.print(tau_y, 3); Serial.print("  | ");
-  Serial.print(motor_isNodePresent(0) ? "1" : "0"); Serial.print(" ");
-  Serial.print(motor_isNodePresent(1) ? "1" : "0"); Serial.print(" ");
-  Serial.print(motor_isNodePresent(2) ? "1" : "0"); Serial.print("  | ");
-  Serial.print(v1, 3); Serial.print(" ");
-  Serial.print(v2, 3); Serial.print(" ");
-  Serial.print(v3, 3); Serial.print("  | ");
-  Serial.print(e1, 3); Serial.print(" ");
-  Serial.print(e2, 3); Serial.print(" ");
-  Serial.print(e3, 3); Serial.print("  | ");
-  Serial.print(vel_scale, 2); Serial.print(" ");
-  Serial.println(vel_max, 2);
-}
 
 void setup() {
   Serial.begin(115200);
@@ -259,9 +267,10 @@ void setup() {
           roll_z = -roll_z;
 #endif
           motor_requestEncoderFeedback();
-          float e1, e2, e3;
+          float e1, e2, e3, p1, p2, p3;
           motor_getEncoderVelocities(&e1, &e2, &e3);
-          printRow(roll_z, pitch_z, yaw_z, x[3], x[4], x[5], 0.0f, 0.0f, 0.0f, s1, s2, s3, e1, e2, e3, 0.0f, 0.0f);
+          motor_getEncoderPositions(&p1, &p2, &p3);
+          printRow(roll_z, pitch_z, yaw_z, x[3], x[4], x[5], 0.0f, 0.0f, 0.0f, s1, s2, s3, e1, e2, e3, p1, p2, p3);
         }
         delay(10);
       }
@@ -388,9 +397,10 @@ void setup() {
           float disp_omega_p = x[4];
 #endif
           motor_requestEncoderFeedback();
-          float e1_oc, e2_oc, e3_oc;
+          float e1_oc, e2_oc, e3_oc, p1_oc, p2_oc, p3_oc;
           motor_getEncoderVelocities(&e1_oc, &e2_oc, &e3_oc);
-          printRow(disp_roll, disp_pitch, yaw_z, disp_omega_r, disp_omega_p, x[5], tau_roll, tau_pitch, tau_yaw, v1_pid, v2_pid, v3_pid, e1_oc, e2_oc, e3_oc, 0.0f, 0.0f);
+          motor_getEncoderPositions(&p1_oc, &p2_oc, &p3_oc);
+          printRow(disp_roll, disp_pitch, yaw_z, disp_omega_r, disp_omega_p, x[5], tau_roll, tau_pitch, tau_yaw, v1_pid, v2_pid, v3_pid, e1_oc, e2_oc, e3_oc, p1_oc, p2_oc, p3_oc);
         }
         delay(10);
       }
@@ -473,8 +483,8 @@ void loop() {
   float pot_max   = VEL_MAX_HIGH;
   control_setVelScaleAndMax(pot_scale, pot_max);
 #else
-  float pot_scale = (float)analogRead(POT_PIN_VEL_SCALE) / POT_ANALOG_MAX;
-  float pot_max   = VEL_MAX_LOW + ((float)analogRead(POT_PIN_VEL_MAX) / POT_ANALOG_MAX) * (VEL_MAX_HIGH - VEL_MAX_LOW);
+  float pot_scale = potNormalize(analogRead(POT_PIN_VEL_SCALE));
+  float pot_max   = VEL_MAX_LOW + potNormalize(analogRead(POT_PIN_VEL_MAX)) * (VEL_MAX_HIGH - VEL_MAX_LOW);
   control_setVelScaleAndMax(pot_scale, pot_max);
 #endif
 
@@ -578,7 +588,7 @@ void loop() {
   motor_sendVelocities(v1_pid, v2_pid, v3_pid);
 
   static uint32_t last_print = 0;
-  if (millis() - last_print > 200) {
+  if (millis() - last_print > SERIAL_PRINT_INTERVAL_MS) {
     last_print = millis();
     const float rad2deg = 180.0f / PI;
     float roll_z, pitch_z, yaw_z;
@@ -616,8 +626,9 @@ void loop() {
     float disp_omega_p = x[4];
   #endif
     motor_requestEncoderFeedback();
-    float e1_ml, e2_ml, e3_ml;
+    float e1_ml, e2_ml, e3_ml, p1_ml, p2_ml, p3_ml;
     motor_getEncoderVelocities(&e1_ml, &e2_ml, &e3_ml);
-    printRow(disp_roll, disp_pitch, yaw_z, disp_omega_r, disp_omega_p, x[5], tau_roll, tau_pitch, tau_yaw, v1_pid, v2_pid, v3_pid, e1_ml, e2_ml, e3_ml, pot_scale, pot_max);
+    motor_getEncoderPositions(&p1_ml, &p2_ml, &p3_ml);
+    printRow(disp_roll, disp_pitch, yaw_z, disp_omega_r, disp_omega_p, x[5], tau_roll, tau_pitch, tau_yaw, v1_pid, v2_pid, v3_pid, e1_ml, e2_ml, e3_ml, p1_ml, p2_ml, p3_ml);
   }
 }
