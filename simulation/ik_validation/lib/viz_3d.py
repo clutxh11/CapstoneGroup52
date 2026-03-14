@@ -1,8 +1,8 @@
 """
 3D visualization: platform orientation + wheel spin arrows (T1, T2, T3).
 
-Convention: roll = rotation about X (bank), pitch = rotation about Y (nose up/down), front = -X.
-Frame: +X right (Simulink), −X = front, +Z up. Omniwheels tilted α = 25.659°; tilt gives yaw (sin α), roll/pitch use cos α.
+Convention: pitch = rotation about X (nose up/down), roll = rotation about Y (bank), yaw about Z.
+Frame: +X right, +Y forward (front), +Z up. Omniwheels tilted α = 25.659°.
 Arrow = spin axis (tilted); +T = arrow direction, -T = opposite. Length ∝ |T|.
 """
 
@@ -12,7 +12,10 @@ import math
 import numpy as np
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
-from ik import ALPHA_DEG, WHEEL_DEG, fk
+from .ik import ALPHA_DEG, WHEEL_DEG, fk
+
+# Legacy: check_travel_dir imports this for frame label.
+FLIP_X = False
 
 # Wheel azimuth from +Y (degrees): 120° spacing with Wheel 2 on -Y axis.
 # Source of truth is ik.WHEEL_DEG to keep visualization and IK aligned.
@@ -22,7 +25,7 @@ DISC_DEPTH = 0.04   # thickness (extent along spin axis) for 3D look
 ARROW_SCALE = 0.2   # max arrow length when |T| = MAX_T
 ARC_DEG = 240       # curved spin arc (degrees)
 SPIN_ARROW_LEN = 0.28   # length of spin-direction arrowhead on wheel
-PLATFORM_RXY = (0.7, 0.55)  # half-extents
+PLATFORM_RXY = (0.55, 0.7)  # half-extents (X = lateral, Y = forward)
 
 # Ball (below platform) and ground — 0.6 m diam → R 0.3 m
 BALL_R = 0.3
@@ -38,8 +41,7 @@ PERSON_H = 0.5       # body height (m)
 HEAD_R = 0.08        # head radius
 LEAN_ARROW_LEN = 0.35   # lean-direction arrow length
 
-# Match Simulink: X flipped, Y and Z same
-FLIP_X = True
+# Frame: +X right, +Y forward (front), +Z up. No flip or swap.
 
 # Visual-only gains so small physical motion is visible in real time.
 WHEEL_ROT_VIS_GAIN = 24.0
@@ -49,23 +51,14 @@ BALL_POS_VIS_GAIN = 120.0   # scale ball (and platform) XY position for visible 
 _view_initialized = False
 
 
-def _flip_x(v: np.ndarray) -> np.ndarray:
-    """Negate X (first column) to match Simulink frame."""
-    if not FLIP_X:
-        return v
-    u = np.array(v, copy=True, ndmin=2)
-    u[..., 0] = -u[..., 0]
-    return u[0] if v.ndim == 1 else u
-
-
 def euler_zyx_matrix(roll: float, pitch: float, yaw: float) -> np.ndarray:
-    """Rotation matrix: roll = X (bank), pitch = Y (nose up/down), yaw = Z. Front = -X.
-    Direct mapping: Rx(roll), Ry(pitch), Rz(yaw). Call with (roll_rad, pitch_rad, yaw_rad)."""
-    cr, sr = math.cos(roll), math.sin(roll)
+    """Rotation matrix: pitch about X (nose up/down), roll about Y (bank), yaw about Z. Forward = +Y.
+    R = Rz(yaw) @ Ry(roll) @ Rx(pitch). Call with (roll_rad, pitch_rad, yaw_rad)."""
     cp, sp = math.cos(pitch), math.sin(pitch)
+    cr, sr = math.cos(roll), math.sin(roll)
     cy, sy = math.cos(yaw), math.sin(yaw)
-    Rx = np.array([[1, 0, 0], [0, cr, -sr], [0, sr, cr]], dtype=float)
-    Ry = np.array([[cp, 0, sp], [0, 1, 0], [-sp, 0, cp]], dtype=float)
+    Rx = np.array([[1, 0, 0], [0, cp, -sp], [0, sp, cp]], dtype=float)
+    Ry = np.array([[cr, 0, sr], [0, 1, 0], [-sr, 0, cr]], dtype=float)
     Rz = np.array([[cy, -sy, 0], [sy, cy, 0], [0, 0, 1]], dtype=float)
     return Rz @ Ry @ Rx
 
@@ -78,13 +71,10 @@ def compute_travel_direction(
 ) -> np.ndarray | None:
     """Unit 2D travel = horizontal τ (same line as resultant torque on ball). No slip ⇒ system moves along τ."""
     roll = math.radians(roll_deg)
-    pitch = -math.radians(pitch_deg)  # positive pitch_deg = nose up
+    pitch = math.radians(pitch_deg)   # positive pitch_deg = nose up (about X)
     yaw = math.radians(yaw_deg)
     R = euler_zyx_matrix(roll, pitch, yaw)
     tau_world = (R @ tau_body).astype(float)
-    if FLIP_X:
-        tau_world[0] = -tau_world[0]
-
     tx, ty = tau_world[0], tau_world[1]
     d_xy = np.array([tx, ty], dtype=float)  # travel ∥ τ (same line)
     n = np.linalg.norm(d_xy)
@@ -96,13 +86,11 @@ def compute_travel_direction(
 def compute_tilt_direction(roll_deg: float, pitch_deg: float, yaw_deg: float) -> np.ndarray | None:
     """Unit 2D tilt direction (green arrow, downward slope). Same as viz green arrow."""
     roll = math.radians(roll_deg)
-    pitch = -math.radians(pitch_deg)  # positive pitch_deg = nose up
+    pitch = math.radians(pitch_deg)   # positive pitch_deg = nose up
     yaw = math.radians(yaw_deg)
     R = euler_zyx_matrix(roll, pitch, yaw)
     up_world = R @ np.array([0.0, 0.0, 1.0])
     tilt_xy = np.array([up_world[0], up_world[1]], dtype=float)
-    if FLIP_X:
-        tilt_xy[0] = -tilt_xy[0]
     n = np.linalg.norm(tilt_xy)
     if n < 1e-12:
         return None
@@ -118,12 +106,10 @@ def compute_resultant_torque_direction(
     """Unit 3D resultant torque (τ) direction in world frame (orange arrow on ball).
     Returns (dx, dy, dz) or None if zero."""
     roll = math.radians(roll_deg)
-    pitch = -math.radians(pitch_deg)  # positive pitch_deg = nose up
+    pitch = math.radians(pitch_deg)   # positive pitch_deg = nose up
     yaw = math.radians(yaw_deg)
     R = euler_zyx_matrix(roll, pitch, yaw)
     tau_world = (R @ tau_body).astype(float)
-    if FLIP_X:
-        tau_world[0] = -tau_world[0]
     n = np.linalg.norm(tau_world)
     if n < 1e-12:
         return None
@@ -187,8 +173,6 @@ def _draw_ball(ax, ball_xy: tuple[float, float] = (0.0, 0.0)) -> None:
     x = r * np.outer(np.cos(u), np.sin(v)) + bx
     y = r * np.outer(np.sin(u), np.sin(v)) + by
     z = r * np.outer(np.ones_like(u), np.cos(v)) - BALL_R
-    if FLIP_X:
-        x = -x
     ax.plot_surface(x, y, z, color="silver", alpha=0.5, edgecolor="gray", linewidth=0.3)
 
 
@@ -197,8 +181,6 @@ def _draw_ground(ax) -> None:
     h = GROUND_HALF
     z = GROUND_Z
     pts = np.array([[-h, -h, z], [h, -h, z], [h, h, z], [-h, h, z]])
-    if FLIP_X:
-        pts[:, 0] = -pts[:, 0]
     poly = Poly3DCollection([pts], alpha=0.2, facecolor="green", edgecolor="darkgreen", linewidths=0.5)
     ax.add_collection3d(poly)
 
@@ -211,18 +193,17 @@ def _draw_person_and_lean(
     lean_pitch_deg: float,
 ) -> None:
     """Draw simple person on platform + lean-direction arrow.
-    Convention: roll = X (bank / left-right), pitch = Y (nose up-down). Body X = forward, body Y = lateral.
-    So lean_pitch → displacement in body X (forward/back), lean_roll → body Y (left/right)."""
+    Body: X = right, Y = forward. lean_pitch → forward/back (Y), lean_roll → left/right (X)."""
     lr = math.radians(lean_roll_deg)
     lp = math.radians(lean_pitch_deg)
     H = PERSON_H
-    # Body X = forward (pitch), body Y = lateral (roll)
-    dx = H * math.tan(lp) if abs(math.cos(lp)) > 1e-6 else 0.0  # lean_pitch → forward/back (X)
-    dy = H * math.tan(lr) if abs(math.cos(lr)) > 1e-6 else 0.0   # lean_roll → left/right (Y)
+    # Body Y = forward, X = lateral
+    dy = H * math.tan(lp) if abs(math.cos(lp)) > 1e-6 else 0.0  # lean_pitch → forward/back (Y)
+    dx = H * math.tan(lr) if abs(math.cos(lr)) > 1e-6 else 0.0  # lean_roll → left/right (X)
     base = np.array([0.0, 0.0, 0.0])
     top = np.array([dx, dy, H])
     pts = np.array([base, top])
-    pts_w = _flip_x(transform_points(R, pts) + offset)
+    pts_w = transform_points(R, pts) + offset
     ax.plot(pts_w[:, 0], pts_w[:, 1], pts_w[:, 2], color="navy", linewidth=4, solid_capstyle="round", label="person")
     # Head: small sphere at top
     cx, cy, cz = pts_w[1, 0], pts_w[1, 1], pts_w[1, 2]
@@ -232,15 +213,13 @@ def _draw_person_and_lean(
     hy = HEAD_R * np.outer(np.sin(u), np.sin(v)) + cy
     hz = HEAD_R * np.outer(np.ones_like(u), np.cos(v)) + cz
     ax.plot_surface(hx, hy, hz, color="wheat", alpha=0.9, edgecolor="tan", linewidth=0.2)
-    # Lean arrow: direction in body frame = (pitch in X, roll in Y)
-    sx, sy = math.sin(lp), math.sin(lr)
+    # Lean arrow: direction in body frame (forward = Y, lateral = X)
+    sy, sx = math.sin(lp), math.sin(lr)
     n = math.hypot(sx, sy)
     if n < 1e-9:
         return
     d_local = np.array([sx / n, sy / n, 0.0])
     d_world = R @ d_local
-    if FLIP_X:
-        d_world[0] = -d_world[0]
     L = LEAN_ARROW_LEN
     ax.quiver(
         cx, cy, cz,
@@ -312,8 +291,6 @@ def _draw_ball_axes(
         d = Rb @ basis[:, i]
         p0 = center.copy()
         p1 = center + L * d
-        p0 = _flip_x(p0)
-        p1 = _flip_x(p1)
         dv = p1 - p0
         ax.quiver(p0[0], p0[1], p0[2], dv[0], dv[1], dv[2],
                   color=colors[i], linewidth=2.2, arrow_length_ratio=0.22)
@@ -402,18 +379,16 @@ def draw_platform_and_wheels(
     by = by_raw * BALL_POS_VIS_GAIN
     offset = np.array([bx, by, 0.0])
 
-    # Roll = X, Pitch = Y. Negate pitch so positive pitch_deg = nose up (local nose is +X; Ry(+) tips it down).
+    # Pitch about X, roll about Y, yaw about Z. Forward = +Y.
     roll = math.radians(roll_deg)
-    pitch = -math.radians(pitch_deg)
-    yaw = -math.radians(yaw_deg)      # inverted so yaw slider rotates opposite direction
+    pitch = math.radians(pitch_deg)   # positive = nose up
+    yaw = -math.radians(yaw_deg)     # inverted so yaw slider rotates opposite direction
     R = euler_zyx_matrix(roll, pitch, yaw)
 
     # Resultant torque on ball: FK(T1,T2,T3) -> [Roll_T, Pitch_T, Yaw_T]
     tau = fk(t1, t2, t3)
     tau_body = np.array([tau[0], tau[1], tau[2]])
     tau_world = R @ tau_body
-    if FLIP_X:
-        tau_world[0] = -tau_world[0]
 
     # Ground plane (draw first, behind)
     _draw_ground(ax)
@@ -424,8 +399,6 @@ def draw_platform_and_wheels(
 
     # Resultant torque arrow on ball (from ball center)
     bc = np.array([bx, by, -BALL_R], dtype=float)
-    if FLIP_X:
-        bc[0] = -bc[0]
     t_norm = np.linalg.norm(tau_world)
     if t_norm > 1e-9:
         d = (TAU_ARROW_SCALE * min(t_norm / 2.0, 1.0)) * (tau_world / t_norm)
@@ -438,26 +411,22 @@ def draw_platform_and_wheels(
         if flip_travel:
             force = -force
         d_xy = TRAVEL_ARROW_LEN * force
-        ox, oy = (-bx, by) if FLIP_X else (bx, by)
-        ax.quiver(ox, oy, GROUND_Z + 0.02, d_xy[0], d_xy[1], 0,
+        ax.quiver(bx, by, GROUND_Z + 0.02, d_xy[0], d_xy[1], 0,
                   color="darkviolet", arrow_length_ratio=0.25, linewidth=2.5, label="Force (Travel)")
 
     # Green arrow = tilt (downward slope), origin at platform center
     up_world = R @ np.array([0.0, 0.0, 1.0])
     tilt_xy = np.array([up_world[0], up_world[1]], dtype=float)
-    if FLIP_X:
-        tilt_xy[0] = -tilt_xy[0]
     n_tilt = np.linalg.norm(tilt_xy)
     if n_tilt > 1e-9:
         tilt_unit = tilt_xy / n_tilt
         tilt_scaled = TILT_ARROW_LEN * tilt_unit
-        ox, oy = (-bx, by) if FLIP_X else (bx, by)
-        ax.quiver(ox, oy, 0, tilt_scaled[0], tilt_scaled[1], 0,
+        ax.quiver(bx, by, 0, tilt_scaled[0], tilt_scaled[1], 0,
                   color="darkgreen", arrow_length_ratio=0.2, linewidth=3, label="tilt")
 
-    # Platform (flip X to match Simulink), offset by ball_xy
+    # Platform, offset by ball_xy. +Y = forward.
     pts = platform_mesh_local()
-    pts_r = _flip_x(transform_points(R, pts) + offset)
+    pts_r = transform_points(R, pts) + offset
     ax.plot(pts_r[:, 0], pts_r[:, 1], pts_r[:, 2], "b-", linewidth=2, label="platform")
     v = pts_r[:4]
     poly = Poly3DCollection([v], alpha=0.25, facecolor="cyan", edgecolor="blue")
@@ -467,13 +436,12 @@ def draw_platform_and_wheels(
     if lean_roll_deg is not None and lean_pitch_deg is not None:
         _draw_person_and_lean(ax, R, offset, lean_roll_deg, lean_pitch_deg)
 
-    # Labels (front/back): front at displayed -X, back at displayed +X (FLIP_X negates x)
-    # Local +X → world +X → after flip displayed -X → FRONT; local -X → BACK
-    nose_local = np.array([[PLATFORM_RXY[0] + 0.12, 0, 0]])
-    nose = _flip_x(transform_points(R, nose_local) + offset)[0]
+    # Labels: front = +Y, back = -Y
+    nose_local = np.array([[0, PLATFORM_RXY[1] + 0.12, 0]])
+    nose = (transform_points(R, nose_local) + offset)[0]
     ax.text(nose[0], nose[1], nose[2], " FRONT", fontsize=11, color="darkgreen", fontweight="bold")
-    tail_local = np.array([[-PLATFORM_RXY[0] - 0.1, 0, 0]])
-    tail = _flip_x(transform_points(R, tail_local) + offset)[0]
+    tail_local = np.array([[0, -PLATFORM_RXY[1] - 0.1, 0]])
+    tail = (transform_points(R, tail_local) + offset)[0]
     ax.text(tail[0], tail[1], tail[2], " BACK ", fontsize=10, color="gray", ha="center")
 
     # Wheels: tilted disc (orientation) + curved spin arc (rotation direction), offset by ball_xy
@@ -481,8 +449,8 @@ def draw_platform_and_wheels(
     torques = [t1, t2, t3]
     colors = ["#c22", "#2a2", "#22c"]
     for i, ((pos, axis), Ti) in enumerate(zip(wheels, torques)):
-        pos_r = _flip_x((R @ pos + offset).reshape(1, -1))[0]
-        axis_r = _flip_x((R @ axis).reshape(1, -1))[0]
+        pos_r = (R @ pos + offset)
+        axis_r = (R @ axis)
         _draw_wheel_disc_and_spin(ax, pos_r, axis_r, Ti, colors[i], max_T)
         if wheel_theta_rad is not None and i < len(wheel_theta_rad):
             th = wheel_theta_rad[i] * WHEEL_ROT_VIS_GAIN
@@ -490,12 +458,11 @@ def draw_platform_and_wheels(
         # Label above wheel
         ax.text(pos_r[0], pos_r[1], pos_r[2] + 0.1, f"T{i+1}", fontsize=9, color=colors[i], ha="center")
 
-    ax.set_xlabel("X (right, Simulink)" if FLIP_X else "X (left)")
-    ax.set_ylabel("Y  (−X = front)")
+    ax.set_xlabel("X (right)")
+    ax.set_ylabel("Y (front)")
     ax.set_zlabel("Z (up)")
     half = 1.2
-    cx = -bx if FLIP_X else bx
-    ax.set_xlim3d(cx - half, cx + half)
+    ax.set_xlim3d(bx - half, bx + half)
     ax.set_ylim3d(by - half, by + half)
     ax.set_zlim3d(-1.2, 1.1)
     ax.set_box_aspect([1, 1, 1])

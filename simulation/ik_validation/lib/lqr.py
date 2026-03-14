@@ -1,11 +1,13 @@
 """
 LQR gain computation for 3-axis ball-bot balance.
 Matches compute_lqr_ballbot.m in simulation/Matlab.
-Convention: front = -X; state order [roll, pitch, yaw]; roll = X (bank), pitch = Y (nose up/down).
+Convention: pitch about X (nose up/down), roll about Y (bank), yaw about Z; front = +Y.
 
-State: x = [roll, pitch, yaw, omega_roll, omega_pitch, omega_yaw]
+State: x = [roll, pitch, yaw, roll_dot, pitch_dot, yaw_dot]
 Input: u = [tau_roll, tau_pitch, tau_yaw]
 Control law: u = -K @ x
+Note: When building x from physics, use (roll_dot, pitch_dot, yaw_dot) = (omega[1], omega[0], omega[2])
+      since physics.omega is [pitch_dot, roll_dot, yaw_dot] (X, Y, Z).
 """
 
 from __future__ import annotations

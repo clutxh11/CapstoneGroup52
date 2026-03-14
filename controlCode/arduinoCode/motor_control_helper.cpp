@@ -1,5 +1,7 @@
 /*
  * Motor control helper: FlexCAN_T4 + ODrive CAN; three nodes, velocity mode.
+ * LQR+IK output v1,v2,v3 (model convention: positive T -> positive v). ODrive may use
+ * opposite sign for "positive velocity" on some axes; set below to negate when sending.
  */
 #include "motor_control_helper.h"
 #include <Arduino.h>
@@ -9,17 +11,24 @@
 struct ODriveStatus; // Teensy compile hack
 
 #define CAN_BAUDRATE   250000
+// 1 = negate v1 and v2 when sending to ODrive so physical spin matches Simulink (+ - + for positive pitch).
+// Set to 0 if your wiring/ODrive direction already matches the model.
+#define MOTOR_INVERT_V1_V2_SIGN 1
 #define ODRV0_NODE_ID  0
 #define ODRV1_NODE_ID  1
 #define ODRV2_NODE_ID  2
 #define HEARTBEAT_TIMEOUT_MS 500
 #define SENTINEL_NO_SEND -99.0f
+#define ENCODER_REQUEST_TIMEOUT_MS 2
 
 struct ODriveStatus;
 
 static float last_sent_v1 = SENTINEL_NO_SEND;
 static float last_sent_v2 = SENTINEL_NO_SEND;
 static float last_sent_v3 = SENTINEL_NO_SEND;
+
+// Encoder velocities in same frame as v1,v2,v3 (logical); updated by motor_requestEncoderFeedback().
+static float encoder_vel[3] = { 0.0f, 0.0f, 0.0f };
 
 static FlexCAN_T4<CAN1, RX_SIZE_256, TX_SIZE_16> can_intf;
 
@@ -106,20 +115,30 @@ void motor_sendVelocities(float v1, float v2, float v3) {
   last_sent_v2 = SENTINEL_NO_SEND;
   last_sent_v3 = SENTINEL_NO_SEND;
 
+#if MOTOR_INVERT_V1_V2_SIGN
+  float s1 = -v1;
+  float s2 = -v2;
+  float s3 =  v3;
+#else
+  float s1 = v1;
+  float s2 = v2;
+  float s3 = v3;
+#endif
+
   if (isPresent(u0)) {
     ensureVelocityMode(odrv0, u0);
-    odrv0.setVelocity(v1);
-    last_sent_v1 = v1;
+    odrv0.setVelocity(s1);
+    last_sent_v1 = s1;
   }
   if (isPresent(u1)) {
     ensureVelocityMode(odrv1, u1);
-    odrv1.setVelocity(v2);
-    last_sent_v2 = v2;
+    odrv1.setVelocity(s2);
+    last_sent_v2 = s2;
   }
   if (isPresent(u2)) {
     ensureVelocityMode(odrv2, u2);
-    odrv2.setVelocity(v3);
-    last_sent_v3 = v3;
+    odrv2.setVelocity(s3);
+    last_sent_v3 = s3;
   }
 }
 
@@ -141,4 +160,20 @@ void motor_getLastSent(float* v1, float* v2, float* v3) {
   *v1 = last_sent_v1;
   *v2 = last_sent_v2;
   *v3 = last_sent_v3;
+}
+
+void motor_requestEncoderFeedback(void) {
+  Get_Encoder_Estimates_msg_t fb;
+  if (odrv0.getFeedback(fb, ENCODER_REQUEST_TIMEOUT_MS))
+    encoder_vel[0] = -fb.Vel_Estimate;  // logical frame (we send -v1 to node0)
+  if (odrv1.getFeedback(fb, ENCODER_REQUEST_TIMEOUT_MS))
+    encoder_vel[1] = -fb.Vel_Estimate;  // logical frame (we send -v2 to node1)
+  if (odrv2.getFeedback(fb, ENCODER_REQUEST_TIMEOUT_MS))
+    encoder_vel[2] =  fb.Vel_Estimate;  // logical frame (we send +v3 to node2)
+}
+
+void motor_getEncoderVelocities(float* v1, float* v2, float* v3) {
+  *v1 = encoder_vel[0];
+  *v2 = encoder_vel[1];
+  *v3 = encoder_vel[2];
 }

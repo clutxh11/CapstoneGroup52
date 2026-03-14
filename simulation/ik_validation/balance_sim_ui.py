@@ -2,8 +2,8 @@
 """
 Physics-based balance simulation: initial + desired orientation → LQR → IK → physics.
 
-Convention: roll = rotation about X (bank), pitch = rotation about Y (nose up/down),
-yaw about Z; front = world -X. State order [roll, pitch, yaw].
+Convention: pitch = rotation about X (nose up/down), roll = rotation about Y (bank),
+yaw about Z; front = +Y. State order [roll, pitch, yaw].
 
 Set initial orientation (sliders), desired orientation (ref for LQR), press Start.
 Physics integrates wheel torques, ball motion, platform tilt. Real-time 3D view,
@@ -31,10 +31,10 @@ matplotlib.use("TkAgg")
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 
-from ik import ik
-from lqr import compute_lqr
-from physics_sim import PhysicsSim
-from viz_3d import draw_platform_and_wheels
+from lib.ik import ik
+from lib.lqr import compute_lqr
+from lib.physics_sim import PhysicsSim
+from lib.viz_3d import draw_platform_and_wheels
 
 DT = 0.0025   # physics step (400 Hz internal)
 DT_MS = 20    # UI tick ~50 Hz; run multiple physics steps per tick for dense samples
@@ -193,6 +193,9 @@ class BalanceSimUI:
         ttk.Label(inner, text="Motors T1,T2,T3 [N·m]:", anchor=tk.W).pack(anchor=tk.W, pady=(4, 0))
         self.lbl_mot = ttk.Label(inner, text="0.00  0.00  0.00")
         self.lbl_mot.pack(anchor=tk.W)
+        ttk.Label(inner, text="Correcting T1,T2,T3 [N·m]:", anchor=tk.W).pack(anchor=tk.W, pady=(4, 0))
+        self.lbl_correcting = ttk.Label(inner, text="—")
+        self.lbl_correcting.pack(anchor=tk.W)
         ttk.Label(inner, text="Mode:", anchor=tk.W).pack(anchor=tk.W, pady=(4, 0))
         self.lbl_mode = ttk.Label(inner, text="Idle")
         self.lbl_mode.pack(anchor=tk.W)
@@ -325,7 +328,7 @@ class BalanceSimUI:
             brx, bry, brz = self.physics.ball_rotation_rad()
             t1, t2, t3 = self._last_t1, self._last_t2, self._last_t3
         else:
-            # Init sliders: [Roll, Pitch, Yaw]. Positive pitch = nose up (viz negates for display).
+            # Init sliders: [Roll, Pitch, Yaw]. Pitch about X (nose up), roll about Y (bank), front = +Y.
             r = float(self.init_vars[0].get())
             p = float(self.init_vars[1].get())
             y = float(self.init_vars[2].get())
@@ -335,7 +338,7 @@ class BalanceSimUI:
             t1 = t2 = t3 = 0.0
         lr = float(self.lean_vars[0].get())
         lp = float(self.lean_vars[1].get())
-        # Pass (roll, pitch, yaw): Roll slider → X axis, Pitch slider → Y axis (nose up/down).
+        # Pass (roll, pitch, yaw): Roll = about Y (bank), Pitch = about X (nose up), front = +Y.
         draw_platform_and_wheels(
             self.ax, r, p, y,
             t1, t2, t3,
@@ -347,12 +350,25 @@ class BalanceSimUI:
             lean_pitch_deg=lp,
             flip_travel=True,
         )
+        if not self.running:
+            self._update_correcting_torques()
         self.canvas.draw_idle()
+
+    def _update_correcting_torques(self) -> None:
+        """Show motor torques that would correct current initial orientation toward desired (LQR + IK)."""
+        init_rad = self._get_init_rad()
+        ref_rad = self._get_desired_rad()
+        x = np.array([init_rad[0], init_rad[1], init_rad[2], 0.0, 0.0, 0.0])
+        x_ref = np.array([ref_rad[0], ref_rad[1], ref_rad[2], 0.0, 0.0, 0.0])
+        tau = -self.K @ (x - x_ref)
+        tau = np.array([float(tau[0]), float(tau[1]), float(tau[2])])
+        t1, t2, t3 = ik(tau[1], tau[0], tau[2], max_T=MAX_T)
+        self.lbl_correcting.config(text="{:.2f}  {:.2f}  {:.2f}".format(t1, t2, t3))
 
     def _tick(self) -> None:
         if not self.running:
             return
-        # State order: [roll, pitch, yaw]; roll = X (bank), pitch = Y (nose up/down), front = -X
+        # State order: [roll, pitch, yaw]; pitch = X (nose up), roll = Y (bank), front = +Y
         ref_rad = self._get_desired_rad()
         x_ref = np.array([ref_rad[0], ref_rad[1], ref_rad[2], 0.0, 0.0, 0.0])
         lr = deg2rad(self.lean_vars[0].get())
@@ -362,7 +378,9 @@ class BalanceSimUI:
             actual = self.physics.orientation_rad()
             omega = self.physics.omega
             if self.controller_enabled:
-                x = np.array([actual[0], actual[1], actual[2], omega[0], omega[1], omega[2]])
+                # LQR expects x = [roll, pitch, yaw, roll_dot, pitch_dot, yaw_dot].
+                # Physics omega is [pitch_dot, roll_dot, yaw_dot] (X, Y, Z).
+                x = np.array([actual[0], actual[1], actual[2], omega[1], omega[0], omega[2]])
                 tau = -self.K @ (x - x_ref)
                 tau = np.array([float(tau[0]), float(tau[1]), float(tau[2])])
                 t1, t2, t3 = ik(tau[1], tau[0], tau[2], max_T=MAX_T)
@@ -436,6 +454,7 @@ class BalanceSimUI:
         for scale in self.init_scales:
             scale.config(state=tk.DISABLED)
         self.lbl_mode.config(text="Controller OFF (fall test)" if not controller_enabled else "Controller ON (balance)")
+        self.lbl_correcting.config(text="—")
         self._tick()
 
     def _on_start_fall(self) -> None:
@@ -455,6 +474,7 @@ class BalanceSimUI:
         for scale in self.init_scales:
             scale.config(state=tk.NORMAL)
         self.lbl_mode.config(text="Idle")
+        self._refresh_3d()
 
     def _on_reset(self) -> None:
         was_running = self.running

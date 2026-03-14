@@ -15,7 +15,7 @@ from __future__ import annotations
 import math
 import numpy as np
 
-from ik import WHEEL_DEG, fk
+from .ik import WHEEL_DEG, fk
 
 # Platform inertia (kg·m²) and damping (N·m·s)
 J_PLAT = np.array([0.05, 0.05, 0.03])
@@ -64,14 +64,13 @@ IK_MAX_T_RECOMMENDED = 15.0
 
 
 def _euler_zyx(roll: float, pitch: float, yaw: float) -> np.ndarray:
-    """Rotation matrix: roll about X (bank), pitch about Y (nose up/down), yaw about Z. Front = -X.
-    R = Rz(yaw + 90°) @ Ry(pitch) @ Rx(roll) so that at zero orientation body +Y (nose) = world -X."""
-    cr, sr = math.cos(roll), math.sin(roll)
+    """Rotation matrix: pitch about X (nose up/down), roll about Y (bank), yaw about Z. Forward = +Y.
+    R = Rz(yaw) @ Ry(roll) @ Rx(pitch). Body: X = right, Y = forward, Z = up."""
     cp, sp = math.cos(pitch), math.sin(pitch)
-    yaw_front = yaw + math.pi / 2.0
-    cy, sy = math.cos(yaw_front), math.sin(yaw_front)
-    Rx = np.array([[1, 0, 0], [0, cr, -sr], [0, sr, cr]], dtype=float)
-    Ry = np.array([[cp, 0, sp], [0, 1, 0], [-sp, 0, cp]], dtype=float)
+    cr, sr = math.cos(roll), math.sin(roll)
+    cy, sy = math.cos(yaw), math.sin(yaw)
+    Rx = np.array([[1, 0, 0], [0, cp, -sp], [0, sp, cp]], dtype=float)
+    Ry = np.array([[cr, 0, sr], [0, 1, 0], [-sr, 0, cr]], dtype=float)
     Rz = np.array([[cy, -sy, 0], [sy, cy, 0], [0, 0, 1]], dtype=float)
     return Rz @ Ry @ Rx
 
@@ -97,11 +96,11 @@ class PhysicsSim:
         self.wheel_omega = np.zeros(3)
 
     def orientation_rad(self) -> np.ndarray:
-        """Current platform orientation [roll, pitch, yaw] in rad (roll = X/bank, pitch = Y/nose, front = -X)."""
+        """Current platform orientation [roll, pitch, yaw] in rad. Pitch about X (nose up/down), roll about Y (bank), forward = +Y."""
         return np.array([self.roll, self.pitch, self.yaw], dtype=float)
 
     def orientation_deg(self) -> tuple[float, float, float]:
-        """Current platform orientation (roll, pitch, yaw) in degrees (roll = X, pitch = Y, front = -X)."""
+        """Current platform orientation (roll, pitch, yaw) in degrees. Forward = +Y."""
         return (
             math.degrees(self.roll),
             math.degrees(self.pitch),
@@ -210,33 +209,35 @@ class PhysicsSim:
             self.wheel_omega[i] += alpha * dt
             self.wheel_theta[i] += self.wheel_omega[i] * dt
 
-        # Body torques: FK returns [Roll_T, Pitch_T, Yaw_T] (Roll = X, Pitch = Y). Use as-is.
+        # Body torques: FK returns [Roll_T, Pitch_T, Yaw_T]. Body axes: X = pitch, Y = roll, Z = yaw.
         tau = fk(float(T_contact[0]), float(T_contact[1]), float(T_contact[2]))
-        tau_body = np.array([tau[0], tau[1], tau[2]], dtype=float)
+        tau_body = np.array([tau[1], tau[0], tau[2]], dtype=float)  # [Pitch_T, Roll_T, Yaw_T] for X,Y,Z
 
-        # Gravity: roll = X (bank), pitch = Y (nose up/down)
+        # Gravity: pitch about X (nose up/down), roll about Y (bank)
         tau_grav = GRAV_SCALE * np.array([
-            M_ASSY * G * H_CM * math.sin(self.roll),
             M_ASSY * G * H_CM * math.sin(self.pitch),
+            M_ASSY * G * H_CM * math.sin(self.roll),
             0.0,
         ], dtype=float)
 
-        # Person lean: Roll slider → torque about X, Pitch slider → torque about Y.
-        # Negate pitch so backward lean (negative lean_pitch) → positive pitch (back down, nose up).
-        tau_lean = K_LEAN * np.array([lean_roll_rad, -lean_pitch_rad, 0.0], dtype=float)
+        # Person lean: lean_roll → torque about Y, lean_pitch → torque about X. Negate pitch for nose-up.
+        tau_lean = K_LEAN * np.array([-lean_pitch_rad, lean_roll_rad, 0.0], dtype=float)
 
-        # Platform angular acceleration (omega[0]=roll/X, omega[1]=pitch/Y)
+        # Platform angular acceleration: omega[0]=pitch_dot (X), omega[1]=roll_dot (Y), omega[2]=yaw_dot (Z)
         alpha_plat = (tau_body + tau_grav + tau_lean - B_PLAT * self.omega) / J_PLAT
         self.omega += alpha_plat * dt
-        self.roll += self.omega[0] * dt
-        self.pitch += self.omega[1] * dt
+        self.pitch += self.omega[0] * dt
+        self.roll += self.omega[1] * dt
         self.yaw += self.omega[2] * dt
 
         # Ball acceleration from horizontal component of body torque in world frame.
+        # Sign so motion matches lean: lean forward → move forward (+Y); lean right → move right (+X).
+        # Pitch: positive tau_pitch (nose-up) → ball forward → ay = +K*tau_world[0].
+        # Roll: negative tau_roll (correct right tilt) → ball right → ax = -K*tau_world[1].
         R = _euler_zyx(self.roll, self.pitch, self.yaw)
         tau_world = R @ tau_body
-        ax = -K_TAU_TO_A * tau_world[0] / max(BALL_M, 0.1)
-        ay = -K_TAU_TO_A * tau_world[1] / max(BALL_M, 0.1)
+        ax = -K_TAU_TO_A * tau_world[1] / max(BALL_M, 0.1)   # roll → ball X (sign for stability + lean-right→move-right)
+        ay = K_TAU_TO_A * tau_world[0] / max(BALL_M, 0.1)   # pitch → ball Y (lean-forward→move-forward)
         self.ball_vx += ax * dt
         self.ball_vy += ay * dt
         self.ball_vx *= max(0.0, 1.0 - BALL_DAMP * dt)

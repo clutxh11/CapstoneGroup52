@@ -26,4 +26,10 @@ int motor_getAxisState(int node_index);
 // Last velocity value actually passed to setVelocity for each motor; -99.0 means "did not send" this cycle.
 void motor_getLastSent(float* v1, float* v2, float* v3);
 
+// Request encoder feedback from all ODrives (blocking, ~2ms per axis). Fills logical-frame velocities.
+void motor_requestEncoderFeedback(void);
+
+// Last encoder velocity per motor in same frame as commands (v1, v2, v3). Call after motor_requestEncoderFeedback().
+void motor_getEncoderVelocities(float* v1, float* v2, float* v3);
+
 #endif // MOTOR_CONTROL_HELPER_H
