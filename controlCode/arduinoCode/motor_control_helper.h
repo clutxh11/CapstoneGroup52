@@ -35,4 +35,13 @@ void motor_getEncoderVelocities(float* v1, float* v2, float* v3);
 // Last encoder position per motor in revolutions [rev], same sign convention as velocities. Call after motor_requestEncoderFeedback().
 void motor_getEncoderPositions(float* p1, float* p2, float* p3);
 
+// Request torque feedback from all ODrives (blocking). Fills logical-frame Torque_Estimate.
+void motor_requestTorqueFeedback(void);
+
+// Last torque estimate per motor [N·m], same sign convention as commands. Call after motor_requestTorqueFeedback().
+void motor_getTorqueEstimates(float* t1, float* t2, float* t3);
+
+// Send torque commands (logical T1,T2,T3). Switches ODrives to torque control mode.
+void motor_sendTorques(float T1, float T2, float T3);
+
 #endif // MOTOR_CONTROL_HELPER_H

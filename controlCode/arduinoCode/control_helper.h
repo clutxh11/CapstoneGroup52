@@ -25,10 +25,10 @@ float control_getVMax(void);
 
 // LQR controller: x = platform state (IMU A), x_ref = user lean (IMU B).
 // State order: [roll, pitch, yaw, omega_roll, omega_pitch, omega_yaw] in rad and rad/s.
-// Output: velocity commands v1, v2, v3 for motors 1, 2, 3.
-// Optional: tau_roll_out, tau_pitch_out, tau_yaw_out (body-axis response torques); pass NULL to skip.
+// Output: wheel velocity setpoints v1, v2, v3 [rev/s] for inner velocity PI (T1_out, T2_out, T3_out).
+// Optional: tau_roll_out, tau_pitch_out, tau_yaw_out (body-axis torques); pass NULL to skip.
 void control_updateLQR(const float x[6], const float x_ref[6],
-                       float* v1, float* v2, float* v3,
+                       float* T1_out, float* T2_out, float* T3_out,
                        float* tau_roll_out, float* tau_pitch_out, float* tau_yaw_out);
 
 // Set LQR velocity scaling from potentiometers (0..1 scale factor, max vel magnitude).
@@ -47,8 +47,17 @@ void control_applyStictionPID(float v1_cmd, float v2_cmd, float v3_cmd,
                               float dt_s,
                               float* v1_out, float* v2_out, float* v3_out);
 
+// Inner velocity PI: v_des from LQR (converted from IK torques); v_act from encoder Vel_Estimate. Writes v_out[3] [rev/s].
+void control_innerVelocityPI(const float v_des[3], const float v_act[3], float dt_s, float v_out[3]);
+// Set max magnitude for inner velocity PI output [rev/s]. Called from updateLQR; optional override.
+void control_setInnerVelMax(float vel_max);
+
 // Optional: set stiction PID gains (call before or during run). Pass -1 to leave a gain at its current value.
 // kp, ki, kd = P/I/D; deadband = min |v_cmd| to integrate; i_max = integral clamp; corr_max = output correction clamp.
 void control_setStictionGains(float kp, float ki, float kd, float deadband, float i_max, float corr_max);
+
+// Body torques (tau_roll, tau_pitch, tau_yaw) [N·m] -> velocity setpoints v1,v2,v3 [rev/s]. Uses same IK and scaling as LQR path.
+void control_bodyTorqueToVelocity(float tau_roll, float tau_pitch, float tau_yaw,
+                                  float* v1_out, float* v2_out, float* v3_out);
 
 #endif // CONTROL_HELPER_H

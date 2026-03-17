@@ -13,13 +13,15 @@ struct ODriveStatus; // Teensy compile hack
 #define CAN_BAUDRATE   250000
 // 1 = negate v1 and v2 when sending to ODrive so physical spin matches Simulink (+ - + for positive pitch).
 // Set to 0 if your wiring/ODrive direction already matches the model.
-#define MOTOR_INVERT_V1_V2_SIGN 1
+#define MOTOR_INVERT_V1_V2_SIGN 0
 #define ODRV0_NODE_ID  0
 #define ODRV1_NODE_ID  1
 #define ODRV2_NODE_ID  2
 #define HEARTBEAT_TIMEOUT_MS 500
 #define SENTINEL_NO_SEND -99.0f
 #define ENCODER_REQUEST_TIMEOUT_MS 2
+// First-order LPF time constant for encoder vel/pos [s]. Larger = smoother, more lag.
+#define ENCODER_LPF_TAU_S 0.03f
 
 struct ODriveStatus;
 
@@ -31,6 +33,9 @@ static float last_sent_v3 = SENTINEL_NO_SEND;
 static float encoder_vel[3] = { 0.0f, 0.0f, 0.0f };
 static float encoder_pos[3] = { 0.0f, 0.0f, 0.0f };
 
+// Torque estimates (logical frame); updated by motor_requestTorqueFeedback().
+static float torque_est[3] = { 0.0f, 0.0f, 0.0f };
+
 static FlexCAN_T4<CAN1, RX_SIZE_256, TX_SIZE_16> can_intf;
 
 struct ODriveUserData {
@@ -38,6 +43,7 @@ struct ODriveUserData {
   bool received_heartbeat = false;
   uint32_t last_hb_ms = 0;
   bool configured_velocity_mode = false;
+  bool configured_torque_mode = false;
 };
 
 static ODriveUserData u0, u1, u2;
@@ -75,6 +81,20 @@ static void ensureVelocityMode(ODriveCAN& odrv, ODriveUserData& u) {
     odrv.setControllerMode(ODriveControlMode::CONTROL_MODE_VELOCITY_CONTROL,
                            ODriveInputMode::INPUT_MODE_PASSTHROUGH);
     u.configured_velocity_mode = true;
+  }
+}
+
+static void ensureTorqueMode(ODriveCAN& odrv, ODriveUserData& u) {
+  if (!isPresent(u)) return;
+  if (u.last_heartbeat.Axis_State != ODriveAxisState::AXIS_STATE_CLOSED_LOOP_CONTROL) {
+    odrv.clearErrors();
+    odrv.setState(ODriveAxisState::AXIS_STATE_CLOSED_LOOP_CONTROL);
+    return;
+  }
+  if (!u.configured_torque_mode) {
+    odrv.setControllerMode(ODriveControlMode::CONTROL_MODE_TORQUE_CONTROL,
+                           ODriveInputMode::INPUT_MODE_PASSTHROUGH);
+    u.configured_torque_mode = true;
   }
 }
 
@@ -164,18 +184,31 @@ void motor_getLastSent(float* v1, float* v2, float* v3) {
 }
 
 void motor_requestEncoderFeedback(void) {
+  static uint32_t last_ms = 0;
+  uint32_t now_ms = millis();
+  float dt_s = (last_ms > 0) ? (float)(now_ms - last_ms) * 0.001f : 0.02f;
+  if (dt_s <= 0.0f || dt_s > 0.2f) dt_s = 0.02f;
+  last_ms = now_ms;
+  float alpha = dt_s / (ENCODER_LPF_TAU_S + dt_s);
+
   Get_Encoder_Estimates_msg_t fb;
   if (odrv0.getFeedback(fb, ENCODER_REQUEST_TIMEOUT_MS)) {
-    encoder_vel[0] = -fb.Vel_Estimate;  // logical frame (we send -v1 to node0)
-    encoder_pos[0] = -fb.Pos_Estimate;
+    float raw_v =  fb.Vel_Estimate;
+    float raw_p =  fb.Pos_Estimate;
+    encoder_vel[0] += (raw_v - encoder_vel[0]) * alpha;
+    encoder_pos[0] += (raw_p - encoder_pos[0]) * alpha;
   }
   if (odrv1.getFeedback(fb, ENCODER_REQUEST_TIMEOUT_MS)) {
-    encoder_vel[1] = -fb.Vel_Estimate;  // logical frame (we send -v2 to node1)
-    encoder_pos[1] = -fb.Pos_Estimate;
+    float raw_v =  fb.Vel_Estimate;
+    float raw_p =  fb.Pos_Estimate;
+    encoder_vel[1] += (raw_v - encoder_vel[1]) * alpha;
+    encoder_pos[1] += (raw_p - encoder_pos[1]) * alpha;
   }
   if (odrv2.getFeedback(fb, ENCODER_REQUEST_TIMEOUT_MS)) {
-    encoder_vel[2] =  fb.Vel_Estimate;  // logical frame (we send +v3 to node2)
-    encoder_pos[2] =  fb.Pos_Estimate;
+    float raw_v =  fb.Vel_Estimate;
+    float raw_p =  fb.Pos_Estimate;
+    encoder_vel[2] += (raw_v - encoder_vel[2]) * alpha;
+    encoder_pos[2] += (raw_p - encoder_pos[2]) * alpha;
   }
 }
 
@@ -189,4 +222,47 @@ void motor_getEncoderPositions(float* p1, float* p2, float* p3) {
   *p1 = encoder_pos[0];
   *p2 = encoder_pos[1];
   *p3 = encoder_pos[2];
+}
+
+void motor_requestTorqueFeedback(void) {
+  Get_Torques_msg_t fb;
+  if (odrv0.request(fb, ENCODER_REQUEST_TIMEOUT_MS)) {
+    torque_est[0] = -fb.Torque_Estimate;  // logical frame (we send -T1 to node0)
+  }
+  if (odrv1.request(fb, ENCODER_REQUEST_TIMEOUT_MS)) {
+    torque_est[1] = -fb.Torque_Estimate;  // logical frame (we send -T2 to node1)
+  }
+  if (odrv2.request(fb, ENCODER_REQUEST_TIMEOUT_MS)) {
+    torque_est[2] =  fb.Torque_Estimate;  // logical frame (we send +T3 to node2)
+  }
+}
+
+void motor_getTorqueEstimates(float* t1, float* t2, float* t3) {
+  *t1 = torque_est[0];
+  *t2 = torque_est[1];
+  *t3 = torque_est[2];
+}
+
+void motor_sendTorques(float T1, float T2, float T3) {
+#if MOTOR_INVERT_V1_V2_SIGN
+  float s1 = -T1;
+  float s2 = -T2;
+  float s3 =  T3;
+#else
+  float s1 = T1;
+  float s2 = T2;
+  float s3 = T3;
+#endif
+  if (isPresent(u0)) {
+    ensureTorqueMode(odrv0, u0);
+    odrv0.setTorque(s1);
+  }
+  if (isPresent(u1)) {
+    ensureTorqueMode(odrv1, u1);
+    odrv1.setTorque(s2);
+  }
+  if (isPresent(u2)) {
+    ensureTorqueMode(odrv2, u2);
+    odrv2.setTorque(s3);
+  }
 }

@@ -3,6 +3,7 @@
  * LQR + IK path: state from IMU A, reference from IMU B -> body torques -> wheel torques -> velocity.
  * When use_lqr_lookup: K is selected from control_lqr_lookup.h by H_eff = H_CM*cos(roll_ref)*cos(pitch_ref).
  */
+#include "config.h"
 #include "control_helper.h"
 #include "control_lqr_lookup.h"
 #include <Arduino.h>
@@ -36,36 +37,44 @@ static const float IK_MAX_TORQUE = 2.0f;
 #if LQR_COMPUTE_K_AT_INIT
 // Plant (match compute_lqr_lookup.m): mass [kg], gravity, CoM height [m], inertias [kg·m^2], damping [N·m·s].
 // Use LQR_PLANT_H_CM to avoid conflict with LQR_H_CM macro in control_lqr_lookup.h
-static const float LQR_M_ASSY   = 80.0f;
+// Total mass of platform + rider [kg]. Used in tilt dynamics: restoring torque = M*g*H*sin(angle).
+static const float LQR_M_ASSY   = 40.0f;
+// Gravitational acceleration [m/s^2].
 static const float LQR_G        = 9.81f;
-static const float LQR_PLANT_H_CM = 0.36875f;  // (50*0.2+30*0.65)/80
-static const float LQR_J_ROLL   = 16.1f;
-static const float LQR_J_PITCH  = 16.4f;
-static const float LQR_J_YAW    = 16.6f;
+// Combined center-of-mass height above pivot (ball center) [m]. Heavy transmission near ball pulls H_CM down.
+static const float LQR_PLANT_H_CM = 0.32f;
+// Rotational inertia about roll axis (X) [kg·m^2]. Larger J = slower angular response.
+static const float LQR_J_ROLL   = 5.5f;
+// Rotational inertia about pitch axis (Y) [kg·m^2].
+static const float LQR_J_PITCH  = 5.5f;
+// Rotational inertia about yaw axis (Z) [kg·m^2].
+static const float LQR_J_YAW    = 6.0f;
+// Viscous damping on roll rate [N·m·s]. Opposes omega_roll in the plant dynamics.
 static const float LQR_B_ROLL   = 0.5f;
+// Viscous damping on pitch rate [N·m·s].
 static const float LQR_B_PITCH  = 0.5f;
+// Viscous damping on yaw rate [N·m·s].
 static const float LQR_B_YAW    = 0.3f;
 // Q diagonal [roll, pitch, yaw, omega_roll, omega_pitch, omega_yaw], R diagonal [tau_roll, tau_pitch, tau_yaw].
-static const float LQR_Q[6] = { 500.0f, 500.0f, 10.0f, 10.0f, 10.0f, 5.0f };
-static const float LQR_R[3] = { 0.05f, 0.05f, 0.05f };
+static const float LQR_Q[6] = { 500.0f, 500.0f, 100.0f, 100.0f, 100.0f, 500.0f };
+static const float LQR_R[3] = { 0.08f, 0.08f, 0.08f };
 static float K_computed[3][6];
 static uint8_t K_computed_valid = 0;
 #endif
 
-// Torque to velocity scaling for ODrive (tune for your motors)
-static const float K_TAU_TO_VEL = 2.0f;
-// Runtime: set from potentiometers (pin 26 = vel scale, pin 27 = max vel).
-static float g_vel_max_lqr = 10.0f;
-static float g_vel_scale = 0.70f;
+// Runtime velocity scale and max from config (VEL_SCALE, VEL_MAX); updated by control_setVelScaleAndMax().
+static float g_vel_max_lqr = VEL_MAX;
+static float g_vel_scale = VEL_SCALE;
 static uint8_t use_lqr_lookup = 0;
 // Reference max so that max_vel pot scales command range: vel_cmd uses full 0..max_vel (LQR output ~2–3 typically).
-static const float VEL_MAX_REF = 2.5f;
-// Scale down body torques before IK so large LQR outputs don't always saturate; keeps commands proportional.
-static const float TAU_SCALE = 0.01f;
+static const float VEL_MAX_REF = 3.0f;
+// Scale body torques before IK. TAU_SCALE=1.0 passes LQR torques unchanged; lower values reduce commanded effort.
+static const float TAU_SCALE = 0.1f;
+// Safety tilt limit [rad]: if |pitch| or |roll| exceeds this, zero all LQR torques (motors commanded to zero).
+static const float TILT_LIMIT_RAD = 10.0f * (PI / 180.0f);
 
 // LQR deadzone: angle errors within ±5° of (0,0,0) are zeroed (platform can't be perfectly level).
-static const float LQR_DEADZONE_DEG = 0.0f;
-static const float LQR_DEADZONE_RAD = LQR_DEADZONE_DEG * (PI / 180.0f);
+static const float LQR_DEADZONE_RAD = ORIENTATION_DEADBAND_DEG * (PI / 180.0f);
 
 static const float DELTA_DEADBAND_RAD   = 0.06f;
 static const float DELTA_FULLSCALE_RAD  = 0.60f;
@@ -81,11 +90,16 @@ static float STICTION_CORRECTION_MAX = 3.0f;   // max additive correction per mo
 static float stiction_integral[3] = { 0.0f, 0.0f, 0.0f };
 static float stiction_prev_error[3] = { 0.0f, 0.0f, 0.0f };
 
+// ----- Inner velocity PID (one set for all motors). Gains from config.h (INNER_VEL_KP, KI, KD, I_MAX). -----
+static float inner_vel_integral[3] = { 0.0f, 0.0f, 0.0f };
+static float inner_vel_prev_error[3] = { 0.0f, 0.0f, 0.0f };
+static float inner_vel_max = 10.0f;  // clamp output to ±this (rev/s); set from g_vel_max_lqr in updateLQR path
+
 // Gain [vel/rad]: angle error -> velocity. Tune for your system.
 static const float K_ROLL  = 1.0f;
 static const float K_PITCH = 1.0f;
 static const float K_YAW   = 1.0f;
-static const float VEL_MAX = 5.0f;  // max |velocity| per motor
+static const float LEGACY_VEL_MAX = 5.0f;  // max |velocity| per motor (legacy path)
 static const float DIR_TIME_CONSTANT_S   = 0.25f;
 static const float SPEED_TIME_CONSTANT_S = 0.15f;
 static const float SINE_PERIOD_S = 2.0f;
@@ -237,8 +251,8 @@ static float angleToVel(float angle_rad, float zero_rad, float gain) {
   float delta = angle_rad - zero_rad;
   if (fabsf(delta) <= DELTA_DEADBAND_RAD) return 0.0f;
   float v = gain * delta;
-  if (v > VEL_MAX)  v = VEL_MAX;
-  if (v < -VEL_MAX) v = -VEL_MAX;
+  if (v > LEGACY_VEL_MAX)  v = LEGACY_VEL_MAX;
+  if (v < -LEGACY_VEL_MAX) v = -LEGACY_VEL_MAX;
   return v;
 }
 
@@ -286,8 +300,16 @@ static void ik(float roll_T, float pitch_T, float yaw_T,
 }
 
 void control_updateLQR(const float x[6], const float x_ref[6],
-                        float* v1, float* v2, float* v3,
+                        float* T1_out, float* T2_out, float* T3_out,
                         float* tau_roll_out, float* tau_pitch_out, float* tau_yaw_out) {
+  // Safety tilt limit: if roll or pitch exceeds ±TILT_LIMIT_RAD, zero all outputs.
+  if (fabsf(x[0] - x_ref[0]) > TILT_LIMIT_RAD || fabsf(x[1] - x_ref[1]) > TILT_LIMIT_RAD) {
+    *T1_out = 0.0f; *T2_out = 0.0f; *T3_out = 0.0f;
+    if (tau_roll_out)  *tau_roll_out  = 0.0f;
+    if (tau_pitch_out) *tau_pitch_out = 0.0f;
+    if (tau_yaw_out)   *tau_yaw_out   = 0.0f;
+    return;
+  }
   // Error: x - x_ref
   float e[6];
   for (int i = 0; i < 6; i++)
@@ -330,6 +352,16 @@ void control_updateLQR(const float x[6], const float x_ref[6],
   tau_pitch = tmp;
 #endif
 
+#if !ENABLE_LQR_ROLL
+  tau_roll = 0.0f;
+#endif
+#if !ENABLE_LQR_PITCH
+  tau_pitch = 0.0f;
+#endif
+#if !ENABLE_LQR_YAW
+  tau_yaw = 0.0f;
+#endif
+
   if (tau_roll_out)  *tau_roll_out  = tau_roll;
   if (tau_pitch_out) *tau_pitch_out = tau_pitch;
   if (tau_yaw_out)   *tau_yaw_out   = tau_yaw;
@@ -341,33 +373,64 @@ void control_updateLQR(const float x[6], const float x_ref[6],
   float T1, T2, T3;
   ik(tau_roll, tau_pitch, tau_yaw, &T1, &T2, &T3);
 
-  // Scale raw LQR->IK velocity so it uses full 0..max_vel range (otherwise it plateaus around ~2–3).
-  float gain = (VEL_MAX_REF > 0.0f && g_vel_max_lqr > 0.0f)
-      ? (g_vel_max_lqr / VEL_MAX_REF) : 1.0f;
-  float v1_out = (K_TAU_TO_VEL * T1) * gain;
-  float v2_out = (K_TAU_TO_VEL * T2) * gain;
-  float v3_out = (K_TAU_TO_VEL * T3) * gain;
-  if (v1_out > g_vel_max_lqr) v1_out = g_vel_max_lqr;
-  if (v1_out < -g_vel_max_lqr) v1_out = -g_vel_max_lqr;
-  if (v2_out > g_vel_max_lqr) v2_out = g_vel_max_lqr;
-  if (v2_out < -g_vel_max_lqr) v2_out = -g_vel_max_lqr;
-  if (v3_out > g_vel_max_lqr) v3_out = g_vel_max_lqr;
-  if (v3_out < -g_vel_max_lqr) v3_out = -g_vel_max_lqr;
+  // Convert wheel torques to velocity setpoints [rev/s] for ramped velocity control.
+  float v1 = g_vel_scale * K_TAU_TO_VEL * T1;
+  float v2 = g_vel_scale * K_TAU_TO_VEL * T2;
+  float v3 = g_vel_scale * K_TAU_TO_VEL * T3;
+  if (v1 > g_vel_max_lqr) v1 = g_vel_max_lqr;
+  if (v1 < -g_vel_max_lqr) v1 = -g_vel_max_lqr;
+  if (v2 > g_vel_max_lqr) v2 = g_vel_max_lqr;
+  if (v2 < -g_vel_max_lqr) v2 = -g_vel_max_lqr;
+  if (v3 > g_vel_max_lqr) v3 = g_vel_max_lqr;
+  if (v3 < -g_vel_max_lqr) v3 = -g_vel_max_lqr;
 
-  v1_out *= g_vel_scale;
-  v2_out *= g_vel_scale;
-  v3_out *= g_vel_scale;
-
-  *v1 = v1_out;
-  *v2 = v2_out;
-  *v3 = v3_out;
+  *T1_out = v1;
+  *T2_out = v2;
+  *T3_out = v3;
+  inner_vel_max = g_vel_max_lqr;
 }
+
+void control_bodyTorqueToVelocity(float tau_roll, float tau_pitch, float tau_yaw,
+                                  float* v1_out, float* v2_out, float* v3_out) {
+  // Input is already in N·m (e.g. from pots). Do not use TAU_SCALE (that is for LQR output).
+#if !ENABLE_LQR_ROLL
+  tau_roll = 0.0f;
+#endif
+#if !ENABLE_LQR_PITCH
+  tau_pitch = 0.0f;
+#endif
+#if !ENABLE_LQR_YAW
+  tau_yaw = 0.0f;
+#endif
+  float T1, T2, T3;
+  ik(tau_roll, tau_pitch, tau_yaw, &T1, &T2, &T3);
+  float v1 = g_vel_scale * K_TAU_TO_VEL * T1;
+  float v2 = g_vel_scale * K_TAU_TO_VEL * T2;
+  float v3 = g_vel_scale * K_TAU_TO_VEL * T3;
+  if (v1 > g_vel_max_lqr) v1 = g_vel_max_lqr;
+  if (v1 < -g_vel_max_lqr) v1 = -g_vel_max_lqr;
+  if (v2 > g_vel_max_lqr) v2 = g_vel_max_lqr;
+  if (v2 < -g_vel_max_lqr) v2 = -g_vel_max_lqr;
+  if (v3 > g_vel_max_lqr) v3 = g_vel_max_lqr;
+  if (v3 < -g_vel_max_lqr) v3 = -g_vel_max_lqr;
+  *v1_out = v1;
+  *v2_out = v2;
+  *v3_out = v3;
+  inner_vel_max = g_vel_max_lqr;
+}
+
+// Minimum velocity scale so LQR always can produce non-zero commands when there is angle error.
+static const float G_VEL_SCALE_MIN = 0.25f;
+// Minimum velocity clamp so inner PI never clamps commands to zero (pot 27 at zero would otherwise set max=0).
+static const float G_VEL_MAX_MIN = 0.5f;
 
 void control_setVelScaleAndMax(float vel_scale, float vel_max_lqr) {
   if (vel_scale > 1.0f) vel_scale = 1.0f;
   if (vel_scale < 0.0f) vel_scale = 0.0f;
+  if (vel_scale < G_VEL_SCALE_MIN) vel_scale = G_VEL_SCALE_MIN;
   g_vel_scale = vel_scale;
   if (vel_max_lqr < 0.0f) vel_max_lqr = 0.0f;
+  if (vel_max_lqr < G_VEL_MAX_MIN) vel_max_lqr = G_VEL_MAX_MIN;
   g_vel_max_lqr = vel_max_lqr;
 }
 
@@ -410,6 +473,32 @@ void control_applyStictionPID(float v1_cmd, float v2_cmd, float v3_cmd,
   stictionPIDOne(v1_cmd, v1_act, dt_s, 0, &stiction_integral[0], &stiction_prev_error[0], v1_out);
   stictionPIDOne(v2_cmd, v2_act, dt_s, 1, &stiction_integral[1], &stiction_prev_error[1], v2_out);
   stictionPIDOne(v3_cmd, v3_act, dt_s, 2, &stiction_integral[2], &stiction_prev_error[2], v3_out);
+}
+
+void control_innerVelocityPI(const float v_des[3], const float v_act[3], float dt_s, float v_out[3]) {
+  if (dt_s <= 0.0f) {
+    v_out[0] = v_des[0];
+    v_out[1] = v_des[1];
+    v_out[2] = v_des[2];
+    return;
+  }
+  for (int i = 0; i < 3; i++) {
+    float e = v_des[i] - v_act[i];
+    float e_eff = (e > INNER_VEL_DEADBAND || e < -INNER_VEL_DEADBAND) ? e : 0.0f;
+    inner_vel_integral[i] += e_eff * dt_s;
+    if (inner_vel_integral[i] > INNER_VEL_I_MAX) inner_vel_integral[i] = INNER_VEL_I_MAX;
+    if (inner_vel_integral[i] < -INNER_VEL_I_MAX) inner_vel_integral[i] = -INNER_VEL_I_MAX;
+    float d_term = (e_eff - inner_vel_prev_error[i]) / dt_s;
+    inner_vel_prev_error[i] = e_eff;
+    float u = v_des[i] + INNER_VEL_KP * e_eff + INNER_VEL_KI * inner_vel_integral[i] + INNER_VEL_KD * d_term;
+    if (u > inner_vel_max) u = inner_vel_max;
+    if (u < -inner_vel_max) u = -inner_vel_max;
+    v_out[i] = u;
+  }
+}
+
+void control_setInnerVelMax(float vel_max) {
+  if (vel_max >= 0.0f) inner_vel_max = vel_max;
 }
 
 void control_setStictionGains(float kp, float ki, float kd, float deadband, float i_max, float corr_max) {

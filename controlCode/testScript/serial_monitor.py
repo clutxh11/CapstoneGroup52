@@ -32,8 +32,19 @@ except ImportError:
 DEFAULT_BAUD = 115200
 
 # Data row: space-separated floats/ints; header line contains "omega_R" or "Roll"
-# Format: Roll Pitch Yaw | omega_R omega_P omega_Y | tau_R tau_P tau_Y | n0 n1 n2 | v1 v2 v3 | e1 e2 e3 | p1 p2 p3
-DATA_ROW_PATTERN = re.compile(
+# New format: ... | v1 v2 v3 | v1_des v2_des v3_des | e1 e2 e3 | p1 p2 p3
+# Old format (no v_des): ... | v1 v2 v3 | e1 e2 e3 | p1 p2 p3
+DATA_ROW_PATTERN_NEW = re.compile(
+    r"^\s*([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+\|\s*"   # roll pitch yaw
+    r"([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+\|\s*"       # omega_r omega_p omega_y
+    r"([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+\|\s*"       # tau_r tau_p tau_y
+    r"([01])\s+([01])\s+([01])\s+\|\s*"                 # n0 n1 n2
+    r"([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+\|\s*"       # v1 v2 v3
+    r"([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+\|\s*"       # v1_des v2_des v3_des
+    r"([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+\|\s*"       # e1 e2 e3
+    r"([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s*$"           # p1 p2 p3
+)
+DATA_ROW_PATTERN_OLD = re.compile(
     r"^\s*([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+\|\s*"   # roll pitch yaw
     r"([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+\|\s*"       # omega_r omega_p omega_y
     r"([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+\|\s*"       # tau_r tau_p tau_y
@@ -61,33 +72,67 @@ def find_likely_port():
 
 
 def parse_data_row(line: str):
-    m = DATA_ROW_PATTERN.match(line.strip())
-    if not m:
-        return None
-    g = m.groups()
-    return {
-        "roll": float(g[0]),
-        "pitch": float(g[1]),
-        "yaw": float(g[2]),
-        "omega_r": float(g[3]),
-        "omega_p": float(g[4]),
-        "omega_y": float(g[5]),
-        "tau_r": float(g[6]),
-        "tau_p": float(g[7]),
-        "tau_y": float(g[8]),
-        "n0": int(g[9]),
-        "n1": int(g[10]),
-        "n2": int(g[11]),
-        "v1": float(g[12]),
-        "v2": float(g[13]),
-        "v3": float(g[14]),
-        "e1": float(g[15]),
-        "e2": float(g[16]),
-        "e3": float(g[17]),
-        "p1": float(g[18]),
-        "p2": float(g[19]),
-        "p3": float(g[20]),
-    }
+    s = line.strip()
+    m = DATA_ROW_PATTERN_NEW.match(s)
+    if m:
+        g = m.groups()
+        return {
+            "roll": float(g[0]),
+            "pitch": float(g[1]),
+            "yaw": float(g[2]),
+            "omega_r": float(g[3]),
+            "omega_p": float(g[4]),
+            "omega_y": float(g[5]),
+            "tau_r": float(g[6]),
+            "tau_p": float(g[7]),
+            "tau_y": float(g[8]),
+            "n0": int(g[9]),
+            "n1": int(g[10]),
+            "n2": int(g[11]),
+            "v1": float(g[12]),
+            "v2": float(g[13]),
+            "v3": float(g[14]),
+            "v1_des": float(g[15]),
+            "v2_des": float(g[16]),
+            "v3_des": float(g[17]),
+            "e1": float(g[18]),
+            "e2": float(g[19]),
+            "e3": float(g[20]),
+            "p1": float(g[21]),
+            "p2": float(g[22]),
+            "p3": float(g[23]),
+        }
+    m = DATA_ROW_PATTERN_OLD.match(s)
+    if m:
+        g = m.groups()
+        v1, v2, v3 = float(g[12]), float(g[13]), float(g[14])
+        return {
+            "roll": float(g[0]),
+            "pitch": float(g[1]),
+            "yaw": float(g[2]),
+            "omega_r": float(g[3]),
+            "omega_p": float(g[4]),
+            "omega_y": float(g[5]),
+            "tau_r": float(g[6]),
+            "tau_p": float(g[7]),
+            "tau_y": float(g[8]),
+            "n0": int(g[9]),
+            "n1": int(g[10]),
+            "n2": int(g[11]),
+            "v1": v1,
+            "v2": v2,
+            "v3": v3,
+            "v1_des": v1,
+            "v2_des": v2,
+            "v3_des": v3,
+            "e1": float(g[15]),
+            "e2": float(g[16]),
+            "e3": float(g[17]),
+            "p1": float(g[18]),
+            "p2": float(g[19]),
+            "p3": float(g[20]),
+        }
+    return None
 
 
 def _serial_reader_thread(ser: serial.Serial, line_queue: queue.Queue, stop_event: threading.Event):
@@ -115,7 +160,8 @@ SIGNAL_GROUPS = [
     ("Rate ω (rad/s)", ["omega_r", "omega_p", "omega_y"]),
     ("Torque τ", ["tau_r", "tau_p", "tau_y"]),
     ("Nodes", ["n0", "n1", "n2"]),
-    ("Vel cmd", ["v1", "v2", "v3"]),
+    ("Vel cmd (rev/s)", ["v1", "v2", "v3"]),
+    ("Vel des (rev/s)", ["v1_des", "v2_des", "v3_des"]),
     ("Encoder", ["e1", "e2", "e3"]),
     ("Motor pos (rev)", ["p1", "p2", "p3"]),
 ]
@@ -125,10 +171,12 @@ SIGNAL_LABELS = {
     "tau_r": "τ_R", "tau_p": "τ_P", "tau_y": "τ_Y",
     "n0": "n0", "n1": "n1", "n2": "n2",
     "v1": "v1", "v2": "v2", "v3": "v3",
+    "v1_des": "v1_des", "v2_des": "v2_des", "v3_des": "v3_des",
     "e1": "e1", "e2": "e2", "e3": "e3",
     "p1": "p1", "p2": "p2", "p3": "p3",
 }
 ALL_KEYS = [k for _group, keys in SIGNAL_GROUPS for k in keys]
+KEY_TO_GROUP = {k: group for group, keys in SIGNAL_GROUPS for k in keys}
 PLOT_HISTORY_LEN = 800
 VALUE_HISTORY_LEN = 20
 
@@ -166,7 +214,7 @@ def run(port: str, baud: int, csv_path: str | None, use_gui: bool = True):
                     if not csv_header_written:
                         csv_file.write(
                             "roll,pitch,yaw,omega_r,omega_p,omega_y,"
-                            "tau_r,tau_p,tau_y,n0,n1,n2,v1,v2,v3,e1,e2,e3,p1,p2,p3\n"
+                            "tau_r,tau_p,tau_y,n0,n1,n2,v1,v2,v3,v1_des,v2_des,v3_des,e1,e2,e3,p1,p2,p3\n"
                         )
                         csv_header_written = True
                     csv_file.write(
@@ -175,6 +223,7 @@ def run(port: str, baud: int, csv_path: str | None, use_gui: bool = True):
                         f"{row['tau_r']},{row['tau_p']},{row['tau_y']},"
                         f"{row['n0']},{row['n1']},{row['n2']},"
                         f"{row['v1']},{row['v2']},{row['v3']},"
+                        f"{row['v1_des']},{row['v2_des']},{row['v3_des']},"
                         f"{row['e1']},{row['e2']},{row['e3']},"
                         f"{row['p1']},{row['p2']},{row['p3']}\n"
                     )
@@ -216,6 +265,14 @@ def run_gui(port: str, baud: int, csv_path: str | None):
     record_start_time = [None]
     record_data = {k: ([], []) for k in ALL_KEYS}
 
+    # Vel spin: log encoder velocity feedback (e1,e2,e3) to CSV when Arduino prints start/stop messages.
+    torque_spin_logging = [False]
+    torque_spin_csv_file = [None]
+    torque_spin_start_time = [None]
+    # First-order LPF for e1,e2,e3 written to CSV [s]. None = no filter (use raw).
+    ENCODER_VEL_LPF_TAU_S = 0.05
+    torque_spin_lpf_state = [None]  # None or {"e1", "e2", "e3", "t"}
+
     if csv_path:
         csv_file = open(csv_path, "w", newline="")
 
@@ -229,6 +286,13 @@ def run_gui(port: str, baud: int, csv_path: str | None):
             ser_ref[0] = None
         if csv_file:
             csv_file.close()
+        if torque_spin_csv_file[0] is not None:
+            try:
+                torque_spin_csv_file[0].close()
+            except OSError:
+                pass
+            torque_spin_csv_file[0] = None
+        torque_spin_logging[0] = False
         root.destroy()
 
     def try_reconnect():
@@ -254,43 +318,38 @@ def run_gui(port: str, baud: int, csv_path: str | None):
     root.geometry("1100x620")
     root.minsize(700, 400)
 
-    # --- Left: checkboxes ---
+    # --- Left: grouped toggles ---
     left = tk.Frame(root, width=200, padx=8, pady=8)
     left.pack(side=tk.LEFT, fill=tk.Y)
     left.pack_propagate(False)
     tk.Label(left, text="Values / Plot", font=("", 11, "bold")).pack(anchor=tk.W)
-    tk.Label(left, text="V=values table, P=plot", font=("", 9), fg="gray").pack(anchor=tk.W)
+    tk.Label(left, text="Show groups in Current values", font=("", 9), fg="gray").pack(anchor=tk.W)
     ttk.Separator(left, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=6)
     btn_row = tk.Frame(left)
     btn_row.pack(anchor=tk.W, pady=(0, 4))
-    cb_show_vars = {}
-    cb_plot_vars = {}
+    group_show_vars = {group_name: tk.BooleanVar(value=True) for group_name, _ in SIGNAL_GROUPS}
+
+    def _set_all(on: bool):
+        for v in group_show_vars.values():
+            v.set(on)
+        schedule_update()
+
     tk.Button(btn_row, text="All", command=lambda: _set_all(True), font=("", 8)).pack(side=tk.LEFT, padx=1)
     tk.Button(btn_row, text="None", command=lambda: _set_all(False), font=("", 8)).pack(side=tk.LEFT, padx=1)
 
-    def _set_all(on: bool):
-        for k in ALL_KEYS:
-            cb_show_vars[k].set(on)
-            cb_plot_vars[k].set(on)
+    groups_frame = tk.Frame(left)
+    groups_frame.pack(anchor=tk.W, pady=(4, 2), fill=tk.X)
 
-    for group_name, keys in SIGNAL_GROUPS:
-        tk.Label(left, text=group_name, font=("", 9, "bold")).pack(anchor=tk.W, pady=(8, 2))
-        for k in keys:
-            default = k in ("e1", "e2", "e3")
-            sv = tk.BooleanVar(value=default)
-            pv = tk.BooleanVar(value=default)
-            row_f = tk.Frame(left)
-            row_f.pack(anchor=tk.W, padx=12)
-            tk.Label(row_f, text=SIGNAL_LABELS.get(k, k), width=8, anchor=tk.W).pack(side=tk.LEFT)
-            tk.Checkbutton(row_f, text="V", variable=sv, anchor=tk.W, width=2).pack(side=tk.LEFT)
-            tk.Checkbutton(row_f, text="P", variable=pv, anchor=tk.W, width=2).pack(side=tk.LEFT)
-            cb_show_vars[k] = sv
-            cb_plot_vars[k] = pv
-        if group_name == "Encoder":
-            f = tk.Frame(left)
-            f.pack(anchor=tk.W, padx=12)
-            tk.Button(f, text="All", command=lambda: _set_all(True), font=("", 8)).pack(side=tk.LEFT, padx=1)
-            tk.Button(f, text="None", command=lambda: _set_all(False), font=("", 8)).pack(side=tk.LEFT, padx=1)
+    for i, (group_name, _keys) in enumerate(SIGNAL_GROUPS):
+        cb = tk.Checkbutton(
+            groups_frame,
+            text=group_name,
+            variable=group_show_vars[group_name],
+            command=lambda: schedule_update(),
+            anchor=tk.W,
+            padx=4,
+        )
+        cb.grid(row=i, column=0, sticky="w", padx=2, pady=1)
 
     update_after_id = [None]
 
@@ -302,9 +361,8 @@ def run_gui(port: str, baud: int, csv_path: str | None):
             update_after_id[0] = None
         update_after_id[0] = root.after(150, do_update)
 
-    for k in ALL_KEYS:
-        cb_show_vars[k].trace_add("write", lambda *a: schedule_update())
-        cb_plot_vars[k].trace_add("write", lambda *a: schedule_update())
+    for v in group_show_vars.values():
+        v.trace_add("write", lambda *a: schedule_update())
 
     ttk.Separator(left, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=8)
 
@@ -417,9 +475,6 @@ def run_gui(port: str, baud: int, csv_path: str | None):
                 for k in ALL_KEYS:
                     record_data[k][0].clear()
                     record_data[k][1].clear()
-                # Zero motor positions from current values
-                for pk in ("p1", "p2", "p3"):
-                    pos_zero[pk] = last_row.get(pk, 0.0)
                 record_btn.config(text="Stop")
         finally:
             record_btn.config(state=tk.NORMAL)
@@ -431,53 +486,50 @@ def run_gui(port: str, baud: int, csv_path: str | None):
         script_dir = os.path.dirname(os.path.abspath(__file__))
         out_dir = os.path.join(script_dir, "data")
         os.makedirs(out_dir, exist_ok=True)
-        # Save position-only CSV
-        pos_keys = ["p1", "p2", "p3"]
-        pos_t = record_data["p1"][0]
-        if pos_t:
-            with open(os.path.join(out_dir, "motor_pos.csv"), "w") as f:
-                f.write("time,p1,p2,p3\n")
-                for i, t in enumerate(pos_t):
-                    row_vals = ",".join(str(record_data[k][1][i]) for k in pos_keys)
-                    f.write(f"{t},{row_vals}\n")
+        encoder_keys = ["e1", "e2", "e3"]
+        vel_keys = ["v1", "v2", "v3"]
+        t_enc = record_data["e1"][0]
+        t_vel = record_data["v1"][0]
+        if t_enc:
+            with open(os.path.join(out_dir, "encoder.csv"), "w", newline="") as f:
+                f.write("time,e1,e2,e3\n")
+                for i, t in enumerate(t_enc):
+                    vals = ",".join(str(record_data[k][1][i]) for k in encoder_keys)
+                    f.write(f"{t},{vals}\n")
+        if t_vel:
+            with open(os.path.join(out_dir, "vel_commands.csv"), "w", newline="") as f:
+                f.write("time,v1,v2,v3\n")
+                for i, t in enumerate(t_vel):
+                    vals = ",".join(str(record_data[k][1][i]) for k in vel_keys)
+                    f.write(f"{t},{vals}\n")
         if not HAS_MATPLOTLIB:
             return
         import matplotlib.pyplot as plt
-        colors = "C0 C1 C2 C3 C4 C5 C6 C7 C8 C9".split()
-        group_filenames = ["orientation", "rate_omega", "torque", "nodes", "vel_cmd", "encoder", "motor_pos"]
-        for (group_name, keys), fname in zip(SIGNAL_GROUPS, group_filenames):
-            has_data = any(record_data[k][0] for k in keys)
-            if not has_data:
-                continue
+        colors = "C0 C1 C2".split()
+        if t_enc:
             fig, ax = plt.subplots()
-            for i, k in enumerate(keys):
-                t, y = record_data[k]
-                if t:
-                    ax.plot(t, y, label=SIGNAL_LABELS.get(k, k), color=colors[i % len(colors)])
+            for i, k in enumerate(encoder_keys):
+                ax.plot(record_data[k][0], record_data[k][1], label=SIGNAL_LABELS.get(k, k), color=colors[i % len(colors)])
             ax.set_xlabel("Time (s)")
             ax.legend(loc="upper right", fontsize=8)
             ax.grid(True, alpha=0.4)
             fig.tight_layout()
-            fig.savefig(os.path.join(out_dir, fname + ".png"), dpi=150)
+            fig.savefig(os.path.join(out_dir, "encoder.png"), dpi=150)
             plt.close(fig)
-        fig, ax = plt.subplots()
-        for i, k in enumerate(ALL_KEYS):
-            if not cb_plot_vars[k].get():
-                continue
-            t, y = record_data[k]
-            if not t:
-                continue
-            ax.plot(t, y, label=SIGNAL_LABELS.get(k, k), color=colors[i % len(colors)])
-        ax.set_xlabel("Time (s)")
-        ax.legend(loc="upper right", fontsize=8)
-        ax.grid(True, alpha=0.4)
-        fig.tight_layout()
-        fig.savefig(os.path.join(out_dir, "all_signals.png"), dpi=150)
-        plt.close(fig)
+        if t_vel:
+            fig, ax = plt.subplots()
+            for i, k in enumerate(vel_keys):
+                ax.plot(record_data[k][0], record_data[k][1], label=SIGNAL_LABELS.get(k, k), color=colors[i % len(colors)])
+            ax.set_xlabel("Time (s)")
+            ax.legend(loc="upper right", fontsize=8)
+            ax.grid(True, alpha=0.4)
+            fig.tight_layout()
+            fig.savefig(os.path.join(out_dir, "vel_commands.png"), dpi=150)
+            plt.close(fig)
 
     def update_display():
         for k in ALL_KEYS:
-            if cb_show_vars[k].get():
+            if group_show_vars[KEY_TO_GROUP[k]].get():
                 value_tree.column(k, width=72, minwidth=40, stretch=False)
             else:
                 value_tree.column(k, width=0, minwidth=0, stretch=False)
@@ -508,13 +560,67 @@ def run_gui(port: str, baud: int, csv_path: str | None):
                 log_text.delete("1.0", tk.END)
                 log_text.insert(tk.END, "\n".join(raw_lines[-20:]))
                 log_text.see(tk.END)
+
+                # Start vel-spin CSV log: encoder velocity feedback (e1,e2,e3) [rev/s] during vel spin test.
+                if "Vel spin: all motors at" in payload and not torque_spin_logging[0]:
+                    torque_spin_logging[0] = True
+                    torque_spin_lpf_state[0] = None
+                    script_dir = os.path.dirname(os.path.abspath(__file__))
+                    data_dir = os.path.join(script_dir, "data")
+                    os.makedirs(data_dir, exist_ok=True)
+                    try:
+                        torque_spin_csv_file[0] = open(
+                            os.path.join(data_dir, "encoder_velocities.csv"), "w", newline=""
+                        )
+                        torque_spin_csv_file[0].write("# Encoder velocity feedback e1,e2,e3 [rev/s] LPF tau=%.2fs\n" % ENCODER_VEL_LPF_TAU_S)
+                        torque_spin_csv_file[0].write("time,e1,e2,e3\n")
+                        torque_spin_csv_file[0].flush()
+                        torque_spin_start_time[0] = time.perf_counter()
+                    except OSError:
+                        torque_spin_logging[0] = False
+                # Stop vel-spin CSV log when Arduino prints the done message.
+                if ("Vel spin done" in payload or "Resuming normal operations" in payload) and torque_spin_logging[0]:
+                    torque_spin_logging[0] = False
+                    torque_spin_lpf_state[0] = None
+                    # Close encoder CSV only if not recording via Record button.
+                    if not recording[0] and torque_spin_csv_file[0] is not None:
+                        try:
+                            torque_spin_csv_file[0].close()
+                        except OSError:
+                            pass
+                        torque_spin_csv_file[0] = None
+
+                # Log encoder vel (LPF e1,e2,e3) when vel-spin auto-logging is active (Record uses its own CSV).
+                if torque_spin_logging[0] and torque_spin_csv_file[0] is not None and payload.strip():
+                    row = parse_data_row(payload)
+                    if row is not None:
+                        t_elapsed = time.perf_counter() - torque_spin_start_time[0]
+                        s = torque_spin_lpf_state[0]
+                        tau = ENCODER_VEL_LPF_TAU_S
+                        if s is None:
+                            e1, e2, e3 = row["e1"], row["e2"], row["e3"]
+                            torque_spin_lpf_state[0] = {"e1": e1, "e2": e2, "e3": e3, "t": t_elapsed}
+                        else:
+                            dt = t_elapsed - s["t"]
+                            if dt <= 0 or dt > 1.0:
+                                dt = 0.05
+                            alpha = dt / (tau + dt)
+                            e1 = s["e1"] + alpha * (row["e1"] - s["e1"])
+                            e2 = s["e2"] + alpha * (row["e2"] - s["e2"])
+                            e3 = s["e3"] + alpha * (row["e3"] - s["e3"])
+                            torque_spin_lpf_state[0] = {"e1": e1, "e2": e2, "e3": e3, "t": t_elapsed}
+                        torque_spin_csv_file[0].write(
+                            f"{t_elapsed:.3f},{e1:.3f},{e2:.3f},{e3:.3f}\n"
+                        )
+                        torque_spin_csv_file[0].flush()
+
                 if csv_file and payload.strip():
                     row = parse_data_row(payload)
                     if row is not None:
                         if not csv_header_written:
-                            csv_file.write("roll,pitch,yaw,omega_r,omega_p,omega_y,tau_r,tau_p,tau_y,n0,n1,n2,v1,v2,v3,e1,e2,e3,p1,p2,p3\n")
+                            csv_file.write("roll,pitch,yaw,omega_r,omega_p,omega_y,tau_r,tau_p,tau_y,n0,n1,n2,v1,v2,v3,v1_des,v2_des,v3_des,e1,e2,e3,p1,p2,p3\n")
                             csv_header_written = True
-                        csv_file.write(f"{row['roll']},{row['pitch']},{row['yaw']},{row['omega_r']},{row['omega_p']},{row['omega_y']},{row['tau_r']},{row['tau_p']},{row['tau_y']},{row['n0']},{row['n1']},{row['n2']},{row['v1']},{row['v2']},{row['v3']},{row['e1']},{row['e2']},{row['e3']},{row['p1']},{row['p2']},{row['p3']}\n")
+                        csv_file.write(f"{row['roll']},{row['pitch']},{row['yaw']},{row['omega_r']},{row['omega_p']},{row['omega_y']},{row['tau_r']},{row['tau_p']},{row['tau_y']},{row['n0']},{row['n1']},{row['n2']},{row['v1']},{row['v2']},{row['v3']},{row['v1_des']},{row['v2_des']},{row['v3_des']},{row['e1']},{row['e2']},{row['e3']},{row['p1']},{row['p2']},{row['p3']}\n")
                         csv_file.flush()
                 row = parse_data_row(payload)
                 if row is not None:
