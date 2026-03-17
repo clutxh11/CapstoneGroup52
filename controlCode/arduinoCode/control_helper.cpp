@@ -38,15 +38,15 @@ static const float IK_MAX_TORQUE = 2.0f;
 // Plant (match compute_lqr_lookup.m): mass [kg], gravity, CoM height [m], inertias [kg·m^2], damping [N·m·s].
 // Use LQR_PLANT_H_CM to avoid conflict with LQR_H_CM macro in control_lqr_lookup.h
 // Total mass of platform + rider [kg]. Used in tilt dynamics: restoring torque = M*g*H*sin(angle).
-static const float LQR_M_ASSY   = 40.0f;
+static const float LQR_M_ASSY   = 45.0f;
 // Gravitational acceleration [m/s^2].
 static const float LQR_G        = 9.81f;
 // Combined center-of-mass height above pivot (ball center) [m]. Heavy transmission near ball pulls H_CM down.
 static const float LQR_PLANT_H_CM = 0.32f;
 // Rotational inertia about roll axis (X) [kg·m^2]. Larger J = slower angular response.
-static const float LQR_J_ROLL   = 5.5f;
+static const float LQR_J_ROLL   = 31.0f;
 // Rotational inertia about pitch axis (Y) [kg·m^2].
-static const float LQR_J_PITCH  = 5.5f;
+static const float LQR_J_PITCH  = 31.0f;
 // Rotational inertia about yaw axis (Z) [kg·m^2].
 static const float LQR_J_YAW    = 6.0f;
 // Viscous damping on roll rate [N·m·s]. Opposes omega_roll in the plant dynamics.

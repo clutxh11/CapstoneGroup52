@@ -10,10 +10,10 @@
 #define VEL_SCALE  1.0f
 #define VEL_MAX    8.0f
 // Gain from wheel torque to velocity setpoint [rev/s per N·m] (used in control_helper for tau -> v).
-#define K_TAU_TO_VEL  1.7f
+#define K_TAU_TO_VEL  1.3f
 
 // Inner loop velocity PID (v_des from LQR/IK, v_act from encoders); one set for all three motors.
-#define INNER_VEL_KP    0.0f
+#define INNER_VEL_KP    1.3f
 #define INNER_VEL_KI    0.0f
 #define INNER_VEL_KD    0.0f
 #define INNER_VEL_I_MAX 5.0f
