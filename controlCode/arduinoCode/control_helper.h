@@ -65,12 +65,16 @@ void control_setStictionGains(float kp, float ki, float kd, float deadband, floa
 void control_bodyTorqueToVelocity(float tau_roll, float tau_pitch, float tau_yaw,
                                   float* v1_out, float* v2_out, float* v3_out);
 
-// On-the-fly tuning: override plant/LQR/inner gains from potentiometers. When USE_POT_TUNE_* is 1, call from loop.
+// On-the-fly tuning: override plant / outer PID (roll+pitch) / inner gains from pots. When USE_POT_TUNE_* is 1, call from loop.
 // control_setPlantParams: M [kg], J_roll/J_pitch [kg·m²], H_cm [m], x_cm_roll [m] CoM offset along roll axis (+ = toward side that goes up for +roll). Triggers K recompute when params change by threshold.
 void control_setPlantParams(float M, float J_roll, float J_pitch, float H_cm, float x_cm_roll);
 
 // control_setLQRWeights: q_angle (roll+pitch), q_rate (omega), r_torque. Triggers K recompute only when changed.
 void control_setLQRWeights(float q_angle, float q_rate, float r_torque);
+
+// control_setOuterPIDGainsRollPitch: base roll/pitch outer PID gains (before OUTER_PID_SCALE_WITH_PLANT). Yaw uses OUTER_PID_*_YAW only.
+void control_setOuterPIDGainsRollPitch(float kp_roll, float ki_roll, float kd_roll,
+                                       float kp_pitch, float ki_pitch, float kd_pitch);
 
 // control_setInnerPIDGains: kp_high (small error), kp_base (large error), ki, kd. No recompute; used next inner loop tick.
 void control_setInnerPIDGains(float kp_high, float kp_base, float ki, float kd);
@@ -78,6 +82,8 @@ void control_setInnerPIDGains(float kp_high, float kp_base, float ki, float kd);
 // Getters for current tuning values (for serial print when pot tuning). Pass NULL to skip a value.
 void control_getPlantParams(float* M, float* J_roll, float* J_pitch, float* H_cm, float* x_cm);
 void control_getLQRWeights(float* q_angle, float* q_rate, float* r_torque);
+void control_getOuterPIDGainsRollPitch(float* kp_roll, float* ki_roll, float* kd_roll,
+                                       float* kp_pitch, float* ki_pitch, float* kd_pitch);
 void control_getInnerPIDGains(float* kp_high, float* kp_base, float* ki, float* kd);
 
 #endif // CONTROL_HELPER_H

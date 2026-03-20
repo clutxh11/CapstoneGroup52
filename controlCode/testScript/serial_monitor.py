@@ -54,8 +54,9 @@ DATA_ROW_PATTERN_OLD = re.compile(
     r"([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s*$"           # p1 p2 p3
 )
 
-# TUNE line from Arduino: "TUNE M=45.0 J=32.0 H=0.32 X=0.000 | Qa=600 Qr=200 R=0.070 | KPh=10.50 KP=1.50 KI=0.20 KD=0.08"
-TUNE_KEYS = ["M", "J", "H", "X", "Qa", "Qr", "R", "KPh", "KP", "KI", "KD"]
+# TUNE line from Arduino: "TUNE M=... | oKP=... oKI=... oKD=... | KPh=... KP=... KI=... KD=..."
+# Legacy: Qa, Qr, R when pot tuned LQR (older firmware).
+TUNE_KEYS = ["M", "J", "H", "X", "Qa", "Qr", "R", "oKP", "oKI", "oKD", "KPh", "KP", "KI", "KD"]
 
 
 def parse_tune_line(line: str) -> dict | None:
@@ -195,6 +196,7 @@ SIGNAL_LABELS = {
     "p1": "p1", "p2": "p2", "p3": "p3",
     "M": "M", "J": "J", "H": "H", "X": "X",
     "Qa": "Qa", "Qr": "Qr", "R": "R",
+    "oKP": "Outer Kp (R/P)", "oKI": "Outer Ki (R/P)", "oKD": "Outer Kd (R/P)",
     "KPh": "KPh", "KP": "KP", "KI": "KI", "KD": "KD",
 }
 ALL_KEYS = [k for _group, keys in SIGNAL_GROUPS for k in keys]

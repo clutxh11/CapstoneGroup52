@@ -36,11 +36,11 @@ static const float IK_MAX_TORQUE = 2.0f;
 #define LQR_COMPUTE_K_AT_INIT 1
 #if LQR_COMPUTE_K_AT_INIT
 // Plant (match compute_lqr_lookup.m): mass [kg], gravity, CoM height [m], inertias [kg·m^2], damping [N·m·s].
-// Mutable so USE_POT_TUNE_PLANT / USE_POT_TUNE_LQR can override at runtime.
+// Mutable so USE_POT_TUNE_PLANT / USE_POT_TUNE_OUTER_PID can override at runtime.
 static float LQR_M_ASSY   = 45.0f;
 static const float LQR_G  = 9.81f;
 static float LQR_PLANT_H_CM = 0.32f;
-static float LQR_PLANT_X_CM = 0.0f;   // CoM offset along roll axis [m]; positive = toward the side that goes UP when roll is positive
+static float LQR_PLANT_X_CM = 0.006f;   // CoM offset along roll axis [m]; positive = toward the side that goes UP when roll is positive
 static float LQR_J_ROLL   = 32.0f;
 static float LQR_J_PITCH  = 32.0f;
 static float LQR_J_YAW    = 6.0f;
@@ -69,7 +69,7 @@ static uint8_t use_lqr_lookup = 0;
 // Reference max so that max_vel pot scales command range: vel_cmd uses full 0..max_vel (LQR output ~2–3 typically).
 static const float VEL_MAX_REF = 3.0f;
 // Scale body torques before IK. TAU_SCALE=1.0 passes LQR torques unchanged; lower values reduce commanded effort.
-static const float TAU_SCALE = 0.1f;
+static const float TAU_SCALE = 0.113f;
 // Safety tilt limit [rad]: if |pitch| or |roll| exceeds this, zero all LQR torques (motors commanded to zero).
 static const float TILT_LIMIT_RAD = 10.0f * (PI / 180.0f);
 
@@ -98,6 +98,43 @@ static float inner_runtime_kp_high = INNER_VEL_KP_HIGH;
 static float inner_runtime_kp      = INNER_VEL_KP;
 static float inner_runtime_ki      = INNER_VEL_KI;
 static float inner_runtime_kd      = INNER_VEL_KD;
+
+// Outer-loop PID roll/pitch (yaw from OUTER_PID_*_YAW). Pot / control_setOuterPIDGainsRollPitch can override.
+static float outer_runtime_kp_roll  = OUTER_PID_KP_ROLL;
+static float outer_runtime_ki_roll  = OUTER_PID_KI_ROLL;
+static float outer_runtime_kd_roll  = OUTER_PID_KD_ROLL;
+static float outer_runtime_kp_pitch = OUTER_PID_KP_PITCH;
+static float outer_runtime_ki_pitch = OUTER_PID_KI_PITCH;
+static float outer_runtime_kd_pitch = OUTER_PID_KD_PITCH;
+
+#if OUTER_ANGLE_STICTION_HELP
+// max(|roll_err|,|pitch_err|) in rad -> torque mult for roll+pitch (1 = no boost).
+static float outerAngleTauMult(float abs_roll_pitch_err_rad) {
+  const float small_r = OUTER_ANGLE_BLEND_SMALL_DEG * (PI / 180.0f);
+  const float large_r = OUTER_ANGLE_BLEND_LARGE_DEG * (PI / 180.0f);
+  if (large_r <= small_r)
+    return 1.0f;
+  if (abs_roll_pitch_err_rad <= small_r)
+    return OUTER_ANGLE_BOOST_MAX_MULT;
+  if (abs_roll_pitch_err_rad >= large_r)
+    return 1.0f;
+  float t = (abs_roll_pitch_err_rad - small_r) / (large_r - small_r);
+  if (t < 0.0f) t = 0.0f;
+  if (t > 1.0f) t = 1.0f;
+  float curve;
+  const float s = OUTER_ANGLE_RAMP_SHAPE;
+  if (s <= 0.0f) {
+    curve = t;
+  } else {
+    float p = 1.0f + s;
+    if (p > 8.0f) p = 8.0f;
+    float om = 1.0f - t;
+    if (om < 0.0f) om = 0.0f;
+    curve = 1.0f - powf(om, p);
+  }
+  return OUTER_ANGLE_BOOST_MAX_MULT + curve * (1.0f - OUTER_ANGLE_BOOST_MAX_MULT);
+}
+#endif
 
 // Gain [vel/rad]: angle error -> velocity. Tune for your system.
 static const float K_ROLL  = 1.0f;
@@ -320,10 +357,13 @@ void control_updateLQR(const float x[6], const float x_ref[6],
   for (int i = 0; i < 6; i++)
     e[i] = x[i] - x_ref[i];
 
-  // Deadzone around (0,0,0): zero angle errors within ±5° so we don't fight small level errors
+#if OUTER_ANGLE_STICTION_HELP
+  if (fabsf(e[2]) < LQR_DEADZONE_RAD) e[2] = 0.0f;
+#else
   if (fabsf(e[0]) < LQR_DEADZONE_RAD) e[0] = 0.0f;
   if (fabsf(e[1]) < LQR_DEADZONE_RAD) e[1] = 0.0f;
   if (fabsf(e[2]) < LQR_DEADZONE_RAD) e[2] = 0.0f;
+#endif
 
   // u = K @ e  -> body torques [tau_roll, tau_pitch, tau_yaw]. K from lookup when use_lqr_lookup (user lean).
   float tau_roll, tau_pitch, tau_yaw;
@@ -350,6 +390,15 @@ void control_updateLQR(const float x[6], const float x_ref[6],
     tau_pitch = (K[1][0]*e[0] + K[1][1]*e[1] + K[1][2]*e[2] + K[1][3]*e[3] + K[1][4]*e[4] + K[1][5]*e[5]);
     tau_yaw   = (K[2][0]*e[0] + K[2][1]*e[1] + K[2][2]*e[2] + K[2][3]*e[3] + K[2][4]*e[4] + K[2][5]*e[5]);
   }
+
+#if OUTER_ANGLE_STICTION_HELP
+  {
+    float emax = fmaxf(fabsf(e[0]), fabsf(e[1]));
+    float tm = outerAngleTauMult(emax);
+    tau_roll *= tm;
+    tau_pitch *= tm;
+  }
+#endif
 
 #if LQR_REMAP_SWAP
   float tmp = tau_roll;
@@ -425,19 +474,39 @@ void control_updatePID(const float x[6], const float x_ref[6],
   for (int i = 0; i < 6; i++)
     e[i] = x[i] - x_ref[i];
 
+#if OUTER_ANGLE_STICTION_HELP
+  if (fabsf(e[2]) < LQR_DEADZONE_RAD) e[2] = 0.0f;
+#else
   if (fabsf(e[0]) < LQR_DEADZONE_RAD) e[0] = 0.0f;
   if (fabsf(e[1]) < LQR_DEADZONE_RAD) e[1] = 0.0f;
   if (fabsf(e[2]) < LQR_DEADZONE_RAD) e[2] = 0.0f;
+#endif
 
-  static const float kp[3] = {
-    OUTER_PID_KP_ROLL, OUTER_PID_KP_PITCH, OUTER_PID_KP_YAW
+  float kp[3] = {
+    outer_runtime_kp_roll, outer_runtime_kp_pitch, OUTER_PID_KP_YAW
   };
-  static const float ki[3] = {
-    OUTER_PID_KI_ROLL, OUTER_PID_KI_PITCH, OUTER_PID_KI_YAW
+  float ki[3] = {
+    outer_runtime_ki_roll, outer_runtime_ki_pitch, OUTER_PID_KI_YAW
   };
-  static const float kd[3] = {
-    OUTER_PID_KD_ROLL, OUTER_PID_KD_PITCH, OUTER_PID_KD_YAW
+  float kd[3] = {
+    outer_runtime_kd_roll, outer_runtime_kd_pitch, OUTER_PID_KD_YAW
   };
+
+#if OUTER_PID_SCALE_WITH_PLANT
+#if LQR_COMPUTE_K_AT_INIT
+  // Same H_eff as care_solve: roll uses H + X_CM along roll axis; pitch uses H only.
+  const float ref_pitch = (45.0f * 9.81f * 0.32f) / 32.0f;
+  const float ref_yaw   = (45.0f * 9.81f * 0.32f) / 6.0f;
+  float H_roll  = LQR_PLANT_H_CM + LQR_PLANT_X_CM;
+  float H_pitch = LQR_PLANT_H_CM;
+  float sr = (LQR_M_ASSY * LQR_G * H_roll)  / LQR_J_ROLL  / ref_pitch;
+  float sp = (LQR_M_ASSY * LQR_G * H_pitch) / LQR_J_PITCH / ref_pitch;
+  float sy = (LQR_M_ASSY * LQR_G * H_pitch) / LQR_J_YAW   / ref_yaw;
+  kp[0] *= sr; ki[0] *= sr; kd[0] *= sr;
+  kp[1] *= sp; ki[1] *= sp; kd[1] *= sp;
+  kp[2] *= sy; ki[2] *= sy; kd[2] *= sy;
+#endif
+#endif
 
   float tau_roll  = kp[0] * e[0] + ki[0] * pid_outer_int[0] + kd[0] * e[3];
   float tau_pitch = kp[1] * e[1] + ki[1] * pid_outer_int[1] + kd[1] * e[4];
@@ -461,6 +530,15 @@ void control_updatePID(const float x[6], const float x_ref[6],
     if (tau_yaw   >  tlim) tau_yaw   =  tlim;
     if (tau_yaw   < -tlim) tau_yaw   = -tlim;
   }
+
+#if OUTER_ANGLE_STICTION_HELP
+  {
+    float emax = fmaxf(fabsf(e[0]), fabsf(e[1]));
+    float tm = outerAngleTauMult(emax);
+    tau_roll *= tm;
+    tau_pitch *= tm;
+  }
+#endif
 
 #if LQR_REMAP_SWAP
   float tmp = tau_roll;
@@ -608,7 +686,7 @@ void control_innerVelocityPI(const float v_des[3], const float v_act[3], float d
     if (inner_vel_integral[i] < -INNER_VEL_I_MAX) inner_vel_integral[i] = -INNER_VEL_I_MAX;
     float d_term = (e_eff - inner_vel_prev_error[i]) / dt_s;
     inner_vel_prev_error[i] = e_eff;
-    // Nonlinear KP: piecewise linear — high gain at small |e|, base gain at large |e|.
+    // Nonlinear KP: high gain at small |e|, linear blend to base KP between E_SMALL and E_LARGE.
     float abs_e = fabsf(e_eff);
     float kp_eff;
     if (abs_e <= INNER_VEL_KP_E_SMALL) {
@@ -616,7 +694,10 @@ void control_innerVelocityPI(const float v_des[3], const float v_act[3], float d
     } else if (abs_e >= INNER_VEL_KP_E_LARGE) {
       kp_eff = inner_runtime_kp;
     } else {
-      float t = (abs_e - INNER_VEL_KP_E_SMALL) / (INNER_VEL_KP_E_LARGE - INNER_VEL_KP_E_SMALL);
+      float span = INNER_VEL_KP_E_LARGE - INNER_VEL_KP_E_SMALL;
+      float t = span > 0.0f ? (abs_e - INNER_VEL_KP_E_SMALL) / span : 1.0f;
+      if (t < 0.0f) t = 0.0f;
+      if (t > 1.0f) t = 1.0f;
       kp_eff = inner_runtime_kp_high + t * (inner_runtime_kp - inner_runtime_kp_high);
     }
     float u = v_des[i] + kp_eff * e_eff + inner_runtime_ki * inner_vel_integral[i] + inner_runtime_kd * d_term;
@@ -689,6 +770,16 @@ void control_setInnerPIDGains(float kp_high, float kp_base, float ki, float kd) 
   if (kd >= 0.0f) inner_runtime_kd = kd;
 }
 
+void control_setOuterPIDGainsRollPitch(float kp_roll, float ki_roll, float kd_roll,
+                                       float kp_pitch, float ki_pitch, float kd_pitch) {
+  if (kp_roll >= 0.0f) outer_runtime_kp_roll = kp_roll;
+  if (ki_roll >= 0.0f) outer_runtime_ki_roll = ki_roll;
+  if (kd_roll >= 0.0f) outer_runtime_kd_roll = kd_roll;
+  if (kp_pitch >= 0.0f) outer_runtime_kp_pitch = kp_pitch;
+  if (ki_pitch >= 0.0f) outer_runtime_ki_pitch = ki_pitch;
+  if (kd_pitch >= 0.0f) outer_runtime_kd_pitch = kd_pitch;
+}
+
 #if LQR_COMPUTE_K_AT_INIT
 void control_getPlantParams(float* M, float* J_roll, float* J_pitch, float* H_cm, float* x_cm) {
   if (M) *M = LQR_M_ASSY;
@@ -724,6 +815,16 @@ void control_getInnerPIDGains(float* kp_high, float* kp_base, float* ki, float* 
   if (kp_base) *kp_base = inner_runtime_kp;
   if (ki) *ki = inner_runtime_ki;
   if (kd) *kd = inner_runtime_kd;
+}
+
+void control_getOuterPIDGainsRollPitch(float* kp_roll, float* ki_roll, float* kd_roll,
+                                       float* kp_pitch, float* ki_pitch, float* kd_pitch) {
+  if (kp_roll) *kp_roll = outer_runtime_kp_roll;
+  if (ki_roll) *ki_roll = outer_runtime_ki_roll;
+  if (kd_roll) *kd_roll = outer_runtime_kd_roll;
+  if (kp_pitch) *kp_pitch = outer_runtime_kp_pitch;
+  if (ki_pitch) *ki_pitch = outer_runtime_ki_pitch;
+  if (kd_pitch) *kd_pitch = outer_runtime_kd_pitch;
 }
 
 void control_setStictionGains(float kp, float ki, float kd, float deadband, float i_max, float corr_max) {

@@ -53,7 +53,7 @@ static float applyManualStiction(float v_cmd, float min_mag) {
   return v_cmd;
 }
 
-#if USE_POT_TUNE_PLANT || USE_POT_TUNE_LQR || USE_POT_TUNE_INNER
+#if USE_POT_TUNE_PLANT || (USE_POT_TUNE_OUTER_PID && USE_PID_OUTER) || USE_POT_TUNE_INNER
 // Returns normalized 0..1 from potentiometer (deadzone at low end).
 static float readPotTune(int pin, int deadzone, float analog_max) {
   int raw = analogRead(pin);
@@ -370,13 +370,13 @@ void loop() {
           lerpf(POT_TUNE_PLANT_X_MIN,  POT_TUNE_PLANT_X_MAX,  t1));
     }
 #endif
-#if USE_POT_TUNE_LQR
+#if USE_POT_TUNE_OUTER_PID && USE_PID_OUTER
     {
-      float t2 = readPotTune(POT_TUNE_PIN_LQR, POT_TUNE_DEADZONE, POT_TUNE_ANALOG_MAX);
-      control_setLQRWeights(
-          lerpf(POT_TUNE_LQR_Q_ANGLE_MIN, POT_TUNE_LQR_Q_ANGLE_MAX, t2),
-          lerpf(POT_TUNE_LQR_Q_RATE_MIN,  POT_TUNE_LQR_Q_RATE_MAX,  t2),
-          lerpf(POT_TUNE_LQR_R_MAX, POT_TUNE_LQR_R_MIN, t2));  // high pot = low R = more aggressive
+      float t2 = readPotTune(POT_TUNE_PIN_OUTER_PID, POT_TUNE_DEADZONE, POT_TUNE_ANALOG_MAX);
+      float okp = lerpf(POT_TUNE_OUTER_KP_MIN, POT_TUNE_OUTER_KP_MAX, t2);
+      float oki = lerpf(POT_TUNE_OUTER_KI_MIN, POT_TUNE_OUTER_KI_MAX, t2);
+      float okd = lerpf(POT_TUNE_OUTER_KD_MIN, POT_TUNE_OUTER_KD_MAX, t2);
+      control_setOuterPIDGainsRollPitch(okp, oki, okd, okp, oki, okd);
     }
 #endif
 #if USE_POT_TUNE_INNER
@@ -439,30 +439,31 @@ void loop() {
              last_e1, last_e2, last_e3, last_p1, last_p2, last_p3);
   }
 
-#if (USE_POT_TUNE_PLANT || USE_POT_TUNE_LQR || USE_POT_TUNE_INNER)
+#if (USE_POT_TUNE_PLANT || (USE_POT_TUNE_OUTER_PID && USE_PID_OUTER) || USE_POT_TUNE_INNER)
   {
     static uint32_t last_tune_print = 0;
     if (millis() - last_tune_print >= TUNE_PRINT_INTERVAL_MS) {
       last_tune_print = millis();
-      float M, Jr, Jp, H, Xcm, qa, qr, r, kph, kpb, ki, kd;
+      float M, Jr, Jp, H, Xcm, kph, kpb, ki_in, kd_in;
+      float okpr, okir, okdr, okpp, okip, okdp;
       control_getPlantParams(&M, &Jr, &Jp, &H, &Xcm);
-      control_getLQRWeights(&qa, &qr, &r);
-      control_getInnerPIDGains(&kph, &kpb, &ki, &kd);
+      control_getOuterPIDGainsRollPitch(&okpr, &okir, &okdr, &okpp, &okip, &okdp);
+      control_getInnerPIDGains(&kph, &kpb, &ki_in, &kd_in);
       Serial.print("TUNE ");
 #if USE_POT_TUNE_PLANT
       Serial.print("M="); Serial.print(M, 1); Serial.print(" J="); Serial.print(Jr, 1); Serial.print(" H="); Serial.print(H, 2); Serial.print(" X="); Serial.print(Xcm, 3);
 #endif
-#if USE_POT_TUNE_PLANT && (USE_POT_TUNE_LQR || USE_POT_TUNE_INNER)
+#if USE_POT_TUNE_PLANT && ((USE_POT_TUNE_OUTER_PID && USE_PID_OUTER) || USE_POT_TUNE_INNER)
       Serial.print(" | ");
 #endif
-#if USE_POT_TUNE_LQR
-      Serial.print("Qa="); Serial.print(qa, 0); Serial.print(" Qr="); Serial.print(qr, 0); Serial.print(" R="); Serial.print(r, 3);
+#if USE_POT_TUNE_OUTER_PID && USE_PID_OUTER
+      Serial.print("oKP="); Serial.print(okpr, 1); Serial.print(" oKI="); Serial.print(okir, 2); Serial.print(" oKD="); Serial.print(okdr, 1);
 #endif
-#if USE_POT_TUNE_LQR && USE_POT_TUNE_INNER
+#if (USE_POT_TUNE_OUTER_PID && USE_PID_OUTER) && USE_POT_TUNE_INNER
       Serial.print(" | ");
 #endif
 #if USE_POT_TUNE_INNER
-      Serial.print("KPh="); Serial.print(kph, 2); Serial.print(" KP="); Serial.print(kpb, 2); Serial.print(" KI="); Serial.print(ki, 2); Serial.print(" KD="); Serial.print(kd, 2);
+      Serial.print("KPh="); Serial.print(kph, 2); Serial.print(" KP="); Serial.print(kpb, 2); Serial.print(" KI="); Serial.print(ki_in, 2); Serial.print(" KD="); Serial.print(kd_in, 2);
 #endif
       Serial.println();
     }

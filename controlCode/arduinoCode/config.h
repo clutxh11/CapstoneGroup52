@@ -8,9 +8,9 @@
 
 // Velocity scale and max used by LQR in normal mode (and available in any mode). Not from potentiometers.
 #define VEL_SCALE  1.0f
-#define VEL_MAX    8.0f
+#define VEL_MAX    8.55f
 // Gain from wheel torque to velocity setpoint [rev/s per N·m] (used in control_helper for tau -> v).
-#define K_TAU_TO_VEL  1.32f
+#define K_TAU_TO_VEL  1.20f
 
 // Inner loop velocity PID (v_des from LQR/IK, v_act from encoders); one set for all three motors.
 #define INNER_VEL_KP    1.5f   // base KP (used at large errors, |e| > INNER_VEL_KP_E_LARGE)
@@ -22,12 +22,19 @@
 
 // Nonlinear KP: higher gain near zero error to punch through stiction; lower at large errors to avoid overshoot.
 // KP ramps from INNER_VEL_KP_HIGH (at |e| <= E_SMALL) down to INNER_VEL_KP (at |e| >= E_LARGE).
-#define INNER_VEL_KP_HIGH    10.5f   // aggressive gain for small errors (near stiction)
+#define INNER_VEL_KP_HIGH    16.0f   // aggressive gain for small errors (near stiction)
 #define INNER_VEL_KP_E_SMALL 0.1f   // [rev/s] error below which full boost applies
 #define INNER_VEL_KP_E_LARGE 0.8f   // [rev/s] error above which base KP applies
+// Inner KP blends linearly from KP_HIGH to base KP between E_SMALL and E_LARGE (no curve).
 
-// Orientation deadband [deg]: angle errors (roll, pitch, yaw) within ±this are treated as zero so LQR outputs no torque when "level".
+// Orientation deadband [deg]: yaw only when OUTER_ANGLE_STICTION_HELP is 1; else roll, pitch, yaw.
 #define ORIENTATION_DEADBAND_DEG  0.3f
+// Outer LQR/PID: extra roll+pitch torque at small tilt errors (stiction chain), eases to 1.0. 1 = on (skips roll/pitch deadband, uses mult). 0 = old hard deadband on all axes.
+#define OUTER_ANGLE_STICTION_HELP     1
+#define OUTER_ANGLE_RAMP_SHAPE        0.35f   // 0 = linear mult blend between SMALL/LARGE deg; >0 = ease-out (power 1+shape, capped 8)
+#define OUTER_ANGLE_BOOST_MAX_MULT    6.0f   // torque mult when max(|roll_err|,|pitch_err|) is tiny
+#define OUTER_ANGLE_BLEND_SMALL_DEG   0.15f   // full BOOST_MAX_MULT below this error (deg)
+#define OUTER_ANGLE_BLEND_LARGE_DEG   3.5f    // mult = 1.0 at/above this (deg)
 
 // Loop rates [Hz]. Inner must be >= outer; inner runs encoder + velocity PI + motor command, outer runs IMU + LQR and updates v_des.
 #define OUTER_LOOP_HZ  100
@@ -40,16 +47,20 @@
 
 // 1 = outer loop uses PID on angle + rate error (same IK + velocity path as LQR). 0 = LQR.
 // Ignored when USE_POT_MOTOR_VELOCITY or USE_POT_TORQUE is 1.
-#define USE_PID_OUTER  0
+#define USE_PID_OUTER  1
 
 // Outer-loop PID: tau_axis = Kp*e_angle + Ki*integral(e_angle) + Kd*e_rate [N·m before TAU_SCALE in control_helper].
-// Tune per axis; order of magnitude similar to LQR diagonal (e.g. pitch ~300–400 N·m/rad, D ~ rate column ~15).
-#define OUTER_PID_KP_ROLL    0.0f
-#define OUTER_PID_KI_ROLL    0.0f
-#define OUTER_PID_KD_ROLL    0.0f
-#define OUTER_PID_KP_PITCH  350.0f
+// When OUTER_PID_SCALE_WITH_PLANT is 1, Kp/Ki/Kd are multiplied by (M*g*H_eff/J_axis) / ref so CoM height (H_CM),
+// roll CoM offset (X_CM), mass M, and inertias match the LQR linearization (care_solve). Ref = nominal pitch plant.
+// Tune per axis; at nominal plant (45 kg, 0.32 m, J=32) scale = 1 on roll/pitch.
+#define OUTER_PID_SCALE_WITH_PLANT  1
+
+#define OUTER_PID_KP_ROLL    75.0f
+#define OUTER_PID_KI_ROLL    2.0f
+#define OUTER_PID_KD_ROLL    28.0f
+#define OUTER_PID_KP_PITCH  75.0f
 #define OUTER_PID_KI_PITCH    2.0f
-#define OUTER_PID_KD_PITCH   14.0f
+#define OUTER_PID_KD_PITCH   28.0f
 #define OUTER_PID_KP_YAW     0.0f
 #define OUTER_PID_KI_YAW     0.0f
 #define OUTER_PID_KD_YAW     0.0f
