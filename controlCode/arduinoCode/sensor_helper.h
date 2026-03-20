@@ -1,6 +1,6 @@
 /*
- * Sensor helper: IMU A (display) and IMU B (control).
- * Control axis and zero calibration use IMU B; IMU A is for display only.
+ * Sensor helper: IMU A (platform / LQR state) and IMU B (control / lean ref when dual).
+ * With USE_IMU_B_AS_A in config.h: only BNO080 @0x4B is initialized; IMU A API reads that chip; B vars mirror A.
  */
 #ifndef SENSOR_HELPER_H
 #define SENSOR_HELPER_H

@@ -31,6 +31,11 @@ void control_updateLQR(const float x[6], const float x_ref[6],
                        float* T1_out, float* T2_out, float* T3_out,
                        float* tau_roll_out, float* tau_pitch_out, float* tau_yaw_out);
 
+// PID outer loop: same inputs/outputs as LQR; uses OUTER_PID_* gains and ENABLE_LQR_* axis enables.
+void control_updatePID(const float x[6], const float x_ref[6],
+                       float* T1_out, float* T2_out, float* T3_out,
+                       float* tau_roll_out, float* tau_pitch_out, float* tau_yaw_out);
+
 // Set LQR velocity scaling from potentiometers (0..1 scale factor, max vel magnitude).
 void control_setVelScaleAndMax(float vel_scale, float vel_max_lqr);
 

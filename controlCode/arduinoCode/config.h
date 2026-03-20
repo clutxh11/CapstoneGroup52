@@ -33,19 +33,43 @@
 #define OUTER_LOOP_HZ  400
 #define INNER_LOOP_HZ  800
 
-// Orientation torque toggles (normal LQR and pot-torque mode). 1 = use that axis; 0 = zero torque on that axis (platform does not balance that axis).
-#define ENABLE_LQR_ROLL   0
+// Orientation torque toggles (normal LQR / PID outer and pot-torque mode). 1 = use that axis; 0 = zero torque on that axis (platform does not balance that axis).
+#define ENABLE_LQR_ROLL   1
 #define ENABLE_LQR_PITCH  1
 #define ENABLE_LQR_YAW    0
 
+// 1 = outer loop uses PID on angle + rate error (same IK + velocity path as LQR). 0 = LQR.
+// Ignored when USE_POT_MOTOR_VELOCITY or USE_POT_TORQUE is 1.
+#define USE_PID_OUTER  0
+
+// Outer-loop PID: tau_axis = Kp*e_angle + Ki*integral(e_angle) + Kd*e_rate [N·m before TAU_SCALE in control_helper].
+// Tune per axis; order of magnitude similar to LQR diagonal (e.g. pitch ~300–400 N·m/rad, D ~ rate column ~15).
+#define OUTER_PID_KP_ROLL    0.0f
+#define OUTER_PID_KI_ROLL    0.0f
+#define OUTER_PID_KD_ROLL    0.0f
+#define OUTER_PID_KP_PITCH  350.0f
+#define OUTER_PID_KI_PITCH    2.0f
+#define OUTER_PID_KD_PITCH   14.0f
+#define OUTER_PID_KP_YAW     0.0f
+#define OUTER_PID_KI_YAW     0.0f
+#define OUTER_PID_KD_YAW     0.0f
+// Anti-windup: clamp integrated angle error [rad·s] per axis.
+#define OUTER_PID_INTEGRAL_CLAMP  0.4f
+// Optional saturation of raw body torque before TAU_SCALE [N·m]; set large enough to not clip normal operation.
+#define OUTER_PID_TAU_RAW_CLAMP   40.0f
+
 // 1 = initialize and use second IMU (IMU B) on I2C 0x4B. 0 = skip IMU B; only IMU A required; control axis mirrors IMU A.
 #define USE_IMU_B  0
+
+// 1 = use only the sensor at 0x4B (BNO080): setup never touches 0x4A; platform (IMU A API) reads from that chip; control axis mirrors it.
+// When this is 1, USE_IMU_B is ignored (single IMU on 0x4B; dual-IMU mode is off).
+#define USE_IMU_B_AS_A  0
 
 // 1 = print when IMU A stops returning new packets (getSensorEvent false) and when it recovers — use to diagnose frozen orientation.
 #define DEBUG_IMU_A_NO_EVENT  0
 
 // 1 = after sustained stall, call sensor_init() to reset I2C + IMU(s) (helps recover from I2C/sensor lockup without power cycle).
-#define IMU_A_AUTO_RECOVER           1
+#define IMU_A_AUTO_RECOVER           0
 #define IMU_A_STALL_RECOVER_AFTER_FAIL 500U   // consecutive failed reads before reinit (~1–2 s at outer-loop rate)
 #define IMU_A_RECOVER_COOLDOWN_MS    3000U   // min time between recovery attempts
 
@@ -83,9 +107,9 @@
 
 // ---- On-the-fly tuning potentiometers ----
 // Set flag to 1 to enable that pot; 0 = use static defaults above.
-#define USE_POT_TUNE_PLANT  0   // Pot on pin 26: sweeps plant mass/inertia
-#define USE_POT_TUNE_LQR    0   // Pot on pin 27: sweeps LQR Q/R aggressiveness
-#define USE_POT_TUNE_INNER  0   // Pot on pin 38: sweeps inner-loop PID gains
+#define USE_POT_TUNE_PLANT  1   // Pot on pin 26: sweeps plant mass/inertia
+#define USE_POT_TUNE_LQR    1   // Pot on pin 27: sweeps LQR Q/R aggressiveness
+#define USE_POT_TUNE_INNER  1   // Pot on pin 38: sweeps inner-loop PID gains
 
 #define POT_TUNE_PIN_PLANT  26
 #define POT_TUNE_PIN_LQR    27

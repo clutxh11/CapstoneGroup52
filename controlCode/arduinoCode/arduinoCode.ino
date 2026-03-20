@@ -1,5 +1,5 @@
 /*
- * Modular dual-IMU + ODrive: LQR outer loop (chassis-only, ref = upright), inner loop motor velocity PI.
+ * Modular dual-IMU + ODrive: LQR or PID outer loop (chassis-only, ref = upright), inner loop motor velocity PI.
  * Motor 1=roll, Motor 2=pitch, Motor 3=yaw. State from IMU A; roll/pitch axes swapped to match hardware.
  */
 #include "config.h"
@@ -126,13 +126,15 @@ void setup() {
   for (int i = 0; i < 30 && !Serial; ++i) delay(100);
   delay(200);
 
-  Serial.println("=== LQR + motor velocity PI (sensor -> control -> motor) ===");
+  Serial.println("=== Outer (LQR or PID) + motor velocity PI (sensor -> control -> motor) ===");
 
   // After software reset, give I2C and IMUs time to be ready.
   delay(400);
 
   while (!sensor_init()) {
-#if USE_IMU_B
+#if USE_IMU_B_AS_A
+    Serial.println("Sensor init failed (IMU B @0x4B only; IMU A skipped), retrying in 2s...");
+#elif USE_IMU_B
     Serial.println("Sensor init failed (IMU A or B not found), retrying in 2s...");
 #else
     Serial.println("Sensor init failed (IMU A not found), retrying in 2s...");
@@ -145,7 +147,9 @@ void setup() {
       delay(50);
     }
   }
-#if USE_IMU_B
+#if USE_IMU_B_AS_A
+  Serial.println("IMU B @0x4B OK (USE_IMU_B_AS_A: platform uses B; 0x4A not initialized).");
+#elif USE_IMU_B
   Serial.println("IMU A and B OK");
 #else
   Serial.println("IMU A OK (USE_IMU_B=0: IMU B skipped, control axis = IMU A)");
@@ -154,7 +158,9 @@ void setup() {
   sensor_calibrateZero();
   float rz, pz, yz;
   sensor_getEulerZeroRad(&rz, &pz, &yz);
-#if USE_IMU_B
+#if USE_IMU_B_AS_A
+  Serial.print("Euler zero mirror (rad) roll=");
+#elif USE_IMU_B
   Serial.print("IMU B zero (rad) roll=");
 #else
   Serial.print("Euler zero / IMU B mirror (rad) roll=");
@@ -196,7 +202,11 @@ void setup() {
 #elif USE_POT_MOTOR_VELOCITY
   Serial.println("Mode: Pot velocity — pots set v1,v2,v3 directly (no LQR).");
 #else
-  Serial.println("Mode: LQR chassis only (x_ref = 0).");
+#if USE_PID_OUTER
+  Serial.println("Mode: PID outer (x_ref = 0) + inner velocity PI.");
+#else
+  Serial.println("Mode: LQR outer (x_ref = 0) + inner velocity PI.");
+#endif
 #endif
   Serial.println("Platform: IMU A. Roll/pitch swap: ON.");
   printHeader();
@@ -331,7 +341,7 @@ void loop() {
   const uint32_t inner_period_ms = 1000U / (uint32_t)INNER_LOOP_HZ;
   uint32_t now_ms = millis();
 
-  // Outer loop (IMU + LQR): update v_des at OUTER_LOOP_HZ.
+  // Outer loop (IMU + LQR or PID): update v_des at OUTER_LOOP_HZ.
   if (now_ms - last_outer_ms >= outer_period_ms) {
     last_outer_ms = now_ms;
     float dummy;
@@ -381,7 +391,11 @@ void loop() {
 #endif
 
     float tau_roll, tau_pitch, tau_yaw;
+#if USE_PID_OUTER
+    control_updatePID(x, x_ref, &v_des[0], &v_des[1], &v_des[2], &tau_roll, &tau_pitch, &tau_yaw);
+#else
     control_updateLQR(x, x_ref, &v_des[0], &v_des[1], &v_des[2], &tau_roll, &tau_pitch, &tau_yaw);
+#endif
     last_tau_roll = tau_roll; last_tau_pitch = tau_pitch; last_tau_yaw = tau_yaw;
     last_disp_omega_r = x[3]; last_disp_omega_p = x[4]; last_x5 = x[5];
     const float rad2deg = 180.0f / PI;

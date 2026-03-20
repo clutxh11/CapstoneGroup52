@@ -395,6 +395,119 @@ void control_updateLQR(const float x[6], const float x_ref[6],
   inner_vel_max = g_vel_max_lqr;
 }
 
+// ----- PID outer loop (same plant frame / IK path as LQR) -----
+static float pid_outer_int[3] = { 0.0f, 0.0f, 0.0f };
+static uint32_t pid_outer_last_ms = 0;
+
+void control_updatePID(const float x[6], const float x_ref[6],
+                       float* T1_out, float* T2_out, float* T3_out,
+                       float* tau_roll_out, float* tau_pitch_out, float* tau_yaw_out) {
+  uint32_t now_ms = millis();
+  float dt_s = (pid_outer_last_ms == 0)
+                   ? (1.0f / (float)OUTER_LOOP_HZ)
+                   : (float)(now_ms - pid_outer_last_ms) * 0.001f;
+  pid_outer_last_ms = now_ms;
+  if (dt_s <= 0.0f || dt_s > 0.05f)
+    dt_s = 1.0f / (float)OUTER_LOOP_HZ;
+
+  if (fabsf(x[0] - x_ref[0]) > TILT_LIMIT_RAD || fabsf(x[1] - x_ref[1]) > TILT_LIMIT_RAD) {
+    pid_outer_int[0] = pid_outer_int[1] = pid_outer_int[2] = 0.0f;
+    *T1_out = 0.0f;
+    *T2_out = 0.0f;
+    *T3_out = 0.0f;
+    if (tau_roll_out)  *tau_roll_out  = 0.0f;
+    if (tau_pitch_out) *tau_pitch_out = 0.0f;
+    if (tau_yaw_out)   *tau_yaw_out   = 0.0f;
+    return;
+  }
+
+  float e[6];
+  for (int i = 0; i < 6; i++)
+    e[i] = x[i] - x_ref[i];
+
+  if (fabsf(e[0]) < LQR_DEADZONE_RAD) e[0] = 0.0f;
+  if (fabsf(e[1]) < LQR_DEADZONE_RAD) e[1] = 0.0f;
+  if (fabsf(e[2]) < LQR_DEADZONE_RAD) e[2] = 0.0f;
+
+  static const float kp[3] = {
+    OUTER_PID_KP_ROLL, OUTER_PID_KP_PITCH, OUTER_PID_KP_YAW
+  };
+  static const float ki[3] = {
+    OUTER_PID_KI_ROLL, OUTER_PID_KI_PITCH, OUTER_PID_KI_YAW
+  };
+  static const float kd[3] = {
+    OUTER_PID_KD_ROLL, OUTER_PID_KD_PITCH, OUTER_PID_KD_YAW
+  };
+
+  float tau_roll  = kp[0] * e[0] + ki[0] * pid_outer_int[0] + kd[0] * e[3];
+  float tau_pitch = kp[1] * e[1] + ki[1] * pid_outer_int[1] + kd[1] * e[4];
+  float tau_yaw   = kp[2] * e[2] + ki[2] * pid_outer_int[2] + kd[2] * e[5];
+
+  pid_outer_int[0] += e[0] * dt_s;
+  pid_outer_int[1] += e[1] * dt_s;
+  pid_outer_int[2] += e[2] * dt_s;
+  const float icl = OUTER_PID_INTEGRAL_CLAMP;
+  for (int i = 0; i < 3; i++) {
+    if (pid_outer_int[i] > icl)  pid_outer_int[i] = icl;
+    if (pid_outer_int[i] < -icl) pid_outer_int[i] = -icl;
+  }
+
+  const float tlim = OUTER_PID_TAU_RAW_CLAMP;
+  if (tlim > 0.0f) {
+    if (tau_roll  >  tlim) tau_roll  =  tlim;
+    if (tau_roll  < -tlim) tau_roll  = -tlim;
+    if (tau_pitch >  tlim) tau_pitch =  tlim;
+    if (tau_pitch < -tlim) tau_pitch = -tlim;
+    if (tau_yaw   >  tlim) tau_yaw   =  tlim;
+    if (tau_yaw   < -tlim) tau_yaw   = -tlim;
+  }
+
+#if LQR_REMAP_SWAP
+  float tmp = tau_roll;
+  tau_roll = tau_pitch;
+  tau_pitch = tmp;
+#endif
+
+#if !ENABLE_LQR_ROLL
+  tau_roll = 0.0f;
+  pid_outer_int[0] = 0.0f;
+#endif
+#if !ENABLE_LQR_PITCH
+  tau_pitch = 0.0f;
+  pid_outer_int[1] = 0.0f;
+#endif
+#if !ENABLE_LQR_YAW
+  tau_yaw = 0.0f;
+  pid_outer_int[2] = 0.0f;
+#endif
+
+  if (tau_roll_out)  *tau_roll_out  = tau_roll;
+  if (tau_pitch_out) *tau_pitch_out = tau_pitch;
+  if (tau_yaw_out)   *tau_yaw_out   = tau_yaw;
+
+  tau_roll  *= TAU_SCALE;
+  tau_pitch *= TAU_SCALE;
+  tau_yaw   *= TAU_SCALE;
+
+  float T1, T2, T3;
+  ik(tau_roll, tau_pitch, tau_yaw, &T1, &T2, &T3);
+
+  float v1 = g_vel_scale * K_TAU_TO_VEL * T1;
+  float v2 = g_vel_scale * K_TAU_TO_VEL * T2;
+  float v3 = g_vel_scale * K_TAU_TO_VEL * T3;
+  if (v1 > g_vel_max_lqr) v1 = g_vel_max_lqr;
+  if (v1 < -g_vel_max_lqr) v1 = -g_vel_max_lqr;
+  if (v2 > g_vel_max_lqr) v2 = g_vel_max_lqr;
+  if (v2 < -g_vel_max_lqr) v2 = -g_vel_max_lqr;
+  if (v3 > g_vel_max_lqr) v3 = g_vel_max_lqr;
+  if (v3 < -g_vel_max_lqr) v3 = -g_vel_max_lqr;
+
+  *T1_out = v1;
+  *T2_out = v2;
+  *T3_out = v3;
+  inner_vel_max = g_vel_max_lqr;
+}
+
 void control_bodyTorqueToVelocity(float tau_roll, float tau_pitch, float tau_yaw,
                                   float* v1_out, float* v2_out, float* v3_out) {
   // Input is already in N·m (e.g. from pots). Do not use TAU_SCALE (that is for LQR output).

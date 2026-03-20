@@ -1,5 +1,6 @@
 /*
- * Sensor helper implementation: BNO08x (IMU A) and BNO080 (IMU B) on Wire2.
+ * Sensor helper implementation: BNO08x @0x4A (IMU A) and BNO080 @0x4B (IMU B) on Wire2.
+ * USE_IMU_B_AS_A: init/read only @0x4B; platform uses sensor_readImuA() backed by imuB.
  */
 #include "config.h"
 #include "sensor_helper.h"
@@ -66,8 +67,8 @@ static void quatToEulerRad(float qw, float qx, float qy, float qz,
   *roll_rad  = atan2f(2.0f * (qw*qx + qy*qz), 1.0f - 2.0f * (qx*qx + qy*qy));
 }
 
-#if !USE_IMU_B
-// Mirror IMU A state into IMU B variables so calibration and display behave without a second sensor.
+#if !USE_IMU_B || USE_IMU_B_AS_A
+// Mirror IMU A state into IMU B variables (no second sensor, or USE_IMU_B_AS_A: single IMU fills A then mirror for B API).
 static void mirrorImuAtoImuB(void) {
   rollB_rad  = rollA_rad;
   pitchB_rad = pitchA_rad;
@@ -98,6 +99,7 @@ bool sensor_init(void) {
   Wire2.setClock(400000);
   delay(150);  // Let bus and IMU settle before first transaction
 
+#if !USE_IMU_B_AS_A
   if (!imuA.begin(IMU_A_ADDR, Wire2)) {
     return false;
   }
@@ -108,8 +110,9 @@ bool sensor_init(void) {
     return false;
   }
   delay(100);
+#endif
 
-#if USE_IMU_B
+#if USE_IMU_B || USE_IMU_B_AS_A
   if (!imuB.begin(IMU_B_ADDR, Wire2)) {
     return false;
   }
@@ -132,7 +135,7 @@ void sensor_calibrateZero(void) {
 
   while (millis() - t0 < (uint32_t)IMU_ZERO_CAL_MS) {
     float axis_rad;
-    // IMU A first so USE_IMU_B=0 mirroring in sensor_readControlAxis sees fresh A data.
+    // IMU A first so mirroring in sensor_readControlAxis sees fresh A data (or USE_IMU_B_AS_A: A read from B hardware).
     if (sensor_readImuA(&axis_rad)) {
       sum_roll_a   += rollA_rad;
       sum_pitch_a  += pitchA_rad;
@@ -210,6 +213,26 @@ float sensor_getAxisZero(void) {
 
 bool sensor_readImuA(float* axis_rad) {
   bool got_any = false;
+#if USE_IMU_B_AS_A
+  for (int i = 0; i < 5; i++) {
+    if (!imuB.dataAvailable())
+      break;
+    got_any = true;
+    float qw = imuB.getQuatReal();
+    float qx = imuB.getQuatI();
+    float qy = imuB.getQuatJ();
+    float qz = imuB.getQuatK();
+    float yaw_rad, pitch_rad, roll_rad;
+    quatToEulerRad(qw, qx, qy, qz, &yaw_rad, &pitch_rad, &roll_rad);
+    rollA_rad  = roll_rad;
+    pitchA_rad = pitch_rad;
+    yawA_rad   = yaw_rad;
+    omega_roll_A  = imuB.getGyroX();
+    omega_pitch_A = imuB.getGyroY();
+    omega_yaw_A   = imuB.getGyroZ();
+    quatToEulerDeg(qw, qx, qy, qz, &yawA_deg, &pitchA_deg, &rollA_deg);
+  }
+#else
   for (int i = 0; i < 5; i++) {
     if (!imuA.getSensorEvent())
       break;
@@ -227,6 +250,7 @@ bool sensor_readImuA(float* axis_rad) {
     omega_pitch_A = imuA.getGyroY();
     omega_yaw_A   = imuA.getGyroZ();
   }
+#endif
   if (!got_any) {
     s_imu_a_had_data = false;
     s_imu_a_consec_fail++;
@@ -294,7 +318,11 @@ void sensor_getImuA_EulerDeg(float* yaw_deg, float* pitch_deg, float* roll_deg) 
 
 // Read IMU B; updates display and control axis. Returns true if new data.
 bool sensor_readControlAxis(float* axis_rad) {
-#if !USE_IMU_B
+#if USE_IMU_B_AS_A
+  mirrorImuAtoImuB();
+  *axis_rad = last_control_axis_rad;
+  return s_imu_a_had_data;
+#elif !USE_IMU_B
   mirrorImuAtoImuB();
   *axis_rad = last_control_axis_rad;
   return s_imu_a_had_data;
