@@ -54,6 +54,24 @@ DATA_ROW_PATTERN_OLD = re.compile(
     r"([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s*$"           # p1 p2 p3
 )
 
+# TUNE line from Arduino: "TUNE M=45.0 J=32.0 H=0.32 X=0.000 | Qa=600 Qr=200 R=0.070 | KPh=10.50 KP=1.50 KI=0.20 KD=0.08"
+TUNE_KEYS = ["M", "J", "H", "X", "Qa", "Qr", "R", "KPh", "KP", "KI", "KD"]
+
+
+def parse_tune_line(line: str) -> dict | None:
+    """Parse a TUNE line from Arduino; returns dict of key -> float or None if not a TUNE line."""
+    s = line.strip()
+    if not s.startswith("TUNE "):
+        return None
+    out = {}
+    for key, val in re.findall(r"(\w+)=([-\d.]+)", s):
+        if key in TUNE_KEYS:
+            try:
+                out[key] = float(val)
+            except ValueError:
+                pass
+    return out if out else None
+
 
 def list_ports():
     for p in serial.tools.list_ports.comports():
@@ -164,6 +182,7 @@ SIGNAL_GROUPS = [
     ("Vel des (rev/s)", ["v1_des", "v2_des", "v3_des"]),
     ("Encoder", ["e1", "e2", "e3"]),
     ("Motor pos (rev)", ["p1", "p2", "p3"]),
+    ("Tuning", TUNE_KEYS),
 ]
 SIGNAL_LABELS = {
     "roll": "Roll", "pitch": "Pitch", "yaw": "Yaw",
@@ -174,6 +193,9 @@ SIGNAL_LABELS = {
     "v1_des": "v1_des", "v2_des": "v2_des", "v3_des": "v3_des",
     "e1": "e1", "e2": "e2", "e3": "e3",
     "p1": "p1", "p2": "p2", "p3": "p3",
+    "M": "M", "J": "J", "H": "H", "X": "X",
+    "Qa": "Qa", "Qr": "Qr", "R": "R",
+    "KPh": "KPh", "KP": "KP", "KI": "KI", "KD": "KD",
 }
 ALL_KEYS = [k for _group, keys in SIGNAL_GROUPS for k in keys]
 KEY_TO_GROUP = {k: group for group, keys in SIGNAL_GROUPS for k in keys}
@@ -194,6 +216,7 @@ def run(port: str, baud: int, csv_path: str | None, use_gui: bool = True):
     if csv_path:
         csv_file = open(csv_path, "w", newline="")
 
+    last_tune = {}
     try:
         while True:
             line = ser.readline()
@@ -208,13 +231,20 @@ def run(port: str, baud: int, csv_path: str | None, use_gui: bool = True):
 
             print(text)
 
+            tune_parsed = parse_tune_line(text)
+            if tune_parsed is not None:
+                last_tune.update(tune_parsed)
+
             if csv_file and text.strip():
                 row = parse_data_row(text)
                 if row is not None:
+                    for k in TUNE_KEYS:
+                        row[k] = last_tune.get(k, 0.0)
                     if not csv_header_written:
                         csv_file.write(
                             "roll,pitch,yaw,omega_r,omega_p,omega_y,"
-                            "tau_r,tau_p,tau_y,n0,n1,n2,v1,v2,v3,v1_des,v2_des,v3_des,e1,e2,e3,p1,p2,p3\n"
+                            "tau_r,tau_p,tau_y,n0,n1,n2,v1,v2,v3,v1_des,v2_des,v3_des,e1,e2,e3,p1,p2,p3,"
+                            + ",".join(TUNE_KEYS) + "\n"
                         )
                         csv_header_written = True
                     csv_file.write(
@@ -225,7 +255,8 @@ def run(port: str, baud: int, csv_path: str | None, use_gui: bool = True):
                         f"{row['v1']},{row['v2']},{row['v3']},"
                         f"{row['v1_des']},{row['v2_des']},{row['v3_des']},"
                         f"{row['e1']},{row['e2']},{row['e3']},"
-                        f"{row['p1']},{row['p2']},{row['p3']}\n"
+                        f"{row['p1']},{row['p2']},{row['p3']},"
+                        f"{','.join(str(row.get(k, 0)) for k in TUNE_KEYS)}\n"
                     )
                     csv_file.flush()
     except KeyboardInterrupt:
@@ -261,6 +292,7 @@ def run_gui(port: str, baud: int, csv_path: str | None):
     csv_header_written = False
     time_offset = [None]
     last_row = {}
+    last_tune = {}
     recording = [False]
     record_start_time = [None]
     record_data = {k: ([], []) for k in ALL_KEYS}
@@ -561,6 +593,11 @@ def run_gui(port: str, baud: int, csv_path: str | None):
                 log_text.insert(tk.END, "\n".join(raw_lines[-20:]))
                 log_text.see(tk.END)
 
+                # Parse TUNE lines and keep last values for Current values / CSV
+                tune_parsed = parse_tune_line(payload)
+                if tune_parsed is not None:
+                    last_tune.update(tune_parsed)
+
                 # Start vel-spin CSV log: encoder velocity feedback (e1,e2,e3) [rev/s] during vel spin test.
                 if "Vel spin: all motors at" in payload and not torque_spin_logging[0]:
                     torque_spin_logging[0] = True
@@ -614,15 +651,16 @@ def run_gui(port: str, baud: int, csv_path: str | None):
                         )
                         torque_spin_csv_file[0].flush()
 
-                if csv_file and payload.strip():
-                    row = parse_data_row(payload)
-                    if row is not None:
-                        if not csv_header_written:
-                            csv_file.write("roll,pitch,yaw,omega_r,omega_p,omega_y,tau_r,tau_p,tau_y,n0,n1,n2,v1,v2,v3,v1_des,v2_des,v3_des,e1,e2,e3,p1,p2,p3\n")
-                            csv_header_written = True
-                        csv_file.write(f"{row['roll']},{row['pitch']},{row['yaw']},{row['omega_r']},{row['omega_p']},{row['omega_y']},{row['tau_r']},{row['tau_p']},{row['tau_y']},{row['n0']},{row['n1']},{row['n2']},{row['v1']},{row['v2']},{row['v3']},{row['v1_des']},{row['v2_des']},{row['v3_des']},{row['e1']},{row['e2']},{row['e3']},{row['p1']},{row['p2']},{row['p3']}\n")
-                        csv_file.flush()
                 row = parse_data_row(payload)
+                if row is not None:
+                    for k in TUNE_KEYS:
+                        row[k] = last_tune.get(k, 0.0)
+                if csv_file and payload.strip() and row is not None:
+                    if not csv_header_written:
+                        csv_file.write("roll,pitch,yaw,omega_r,omega_p,omega_y,tau_r,tau_p,tau_y,n0,n1,n2,v1,v2,v3,v1_des,v2_des,v3_des,e1,e2,e3,p1,p2,p3," + ",".join(TUNE_KEYS) + "\n")
+                        csv_header_written = True
+                    csv_file.write(f"{row['roll']},{row['pitch']},{row['yaw']},{row['omega_r']},{row['omega_p']},{row['omega_y']},{row['tau_r']},{row['tau_p']},{row['tau_y']},{row['n0']},{row['n1']},{row['n2']},{row['v1']},{row['v2']},{row['v3']},{row['v1_des']},{row['v2_des']},{row['v3_des']},{row['e1']},{row['e2']},{row['e3']},{row['p1']},{row['p2']},{row['p3']}," + ",".join(str(row.get(k, 0)) for k in TUNE_KEYS) + "\n")
+                    csv_file.flush()
                 if row is not None:
                     t = time.perf_counter()
                     if time_offset[0] is None:

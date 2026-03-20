@@ -1,6 +1,7 @@
 /*
  * Sensor helper implementation: BNO08x (IMU A) and BNO080 (IMU B) on Wire2.
  */
+#include "config.h"
 #include "sensor_helper.h"
 #include <Arduino.h>
 #include <Wire.h>
@@ -31,6 +32,15 @@ static float yawB_deg = 0, pitchB_deg = 0, rollB_deg = 0;
 // IMU A 6-state for LQR: roll, pitch, yaw (rad), omega_roll, omega_pitch, omega_yaw (rad/s)
 static float rollA_rad = 0.0f, pitchA_rad = 0.0f, yawA_rad = 0.0f;
 static float omega_roll_A = 0.0f, omega_pitch_A = 0.0f, omega_yaw_A = 0.0f;
+// Set true at end of sensor_readImuA when new data was processed (for USE_IMU_B=0 mirroring).
+static bool s_imu_a_had_data = false;
+static uint32_t s_imu_a_consec_fail = 0;
+#if DEBUG_IMU_A_NO_EVENT
+static uint32_t s_imu_a_last_stall_warn_ms = 0;
+#endif
+#if IMU_A_AUTO_RECOVER
+static uint32_t s_imu_a_last_recover_ms = 0;
+#endif
 
 static void quatToEulerDeg(float qw, float qx, float qy, float qz,
                            float* yawDeg, float* pitchDeg, float* rollDeg) {
@@ -56,7 +66,29 @@ static void quatToEulerRad(float qw, float qx, float qy, float qz,
   *roll_rad  = atan2f(2.0f * (qw*qx + qy*qz), 1.0f - 2.0f * (qx*qx + qy*qy));
 }
 
+#if !USE_IMU_B
+// Mirror IMU A state into IMU B variables so calibration and display behave without a second sensor.
+static void mirrorImuAtoImuB(void) {
+  rollB_rad  = rollA_rad;
+  pitchB_rad = pitchA_rad;
+  yawB_rad   = yawA_rad;
+  omega_roll_B  = omega_roll_A;
+  omega_pitch_B = omega_pitch_A;
+  omega_yaw_B   = omega_yaw_A;
+  rollB_deg  = rollA_deg;
+  pitchB_deg = pitchA_deg;
+  yawB_deg   = yawA_deg;
+  switch (AXIS_FOR_CONTROL) {
+    case AXIS_ROLL:  last_control_axis_rad = rollA_rad;  break;
+    case AXIS_PITCH: last_control_axis_rad = pitchA_rad; break;
+    case AXIS_YAW:   last_control_axis_rad = yawA_rad;   break;
+  }
+}
+#endif
+
 bool sensor_init(void) {
+  Wire2.end();
+  delay(100);
   Wire2.begin();
   Wire2.setClock(400000);
   delay(50);
@@ -72,12 +104,14 @@ bool sensor_init(void) {
   }
   delay(100);
 
+#if USE_IMU_B
   if (!imuB.begin(IMU_B_ADDR, Wire2)) {
     return false;
   }
   imuB.enableRotationVector(20);
   imuB.enableGyro(20);
   delay(100);
+#endif
   return true;
 }
 
@@ -93,6 +127,16 @@ void sensor_calibrateZero(void) {
 
   while (millis() - t0 < (uint32_t)IMU_ZERO_CAL_MS) {
     float axis_rad;
+    // IMU A first so USE_IMU_B=0 mirroring in sensor_readControlAxis sees fresh A data.
+    if (sensor_readImuA(&axis_rad)) {
+      sum_roll_a   += rollA_rad;
+      sum_pitch_a  += pitchA_rad;
+      sum_yaw_a    += yawA_rad;
+      sum_omega_r_a += omega_roll_A;
+      sum_omega_p_a += omega_pitch_A;
+      sum_omega_y_a += omega_yaw_A;
+      count_a++;
+    }
     if (sensor_readControlAxis(&axis_rad)) {
       sum_roll  += rollB_rad;
       sum_pitch += pitchB_rad;
@@ -102,15 +146,6 @@ void sensor_calibrateZero(void) {
       sum_omega_y_b += omega_yaw_B;
       count++;
       count_b_gyro++;
-    }
-    if (sensor_readImuA(&axis_rad)) {
-      sum_roll_a   += rollA_rad;
-      sum_pitch_a  += pitchA_rad;
-      sum_yaw_a    += yawA_rad;
-      sum_omega_r_a += omega_roll_A;
-      sum_omega_p_a += omega_pitch_A;
-      sum_omega_y_a += omega_yaw_A;
-      count_a++;
     }
     delay(5);
   }
@@ -188,9 +223,45 @@ bool sensor_readImuA(float* axis_rad) {
     omega_yaw_A   = imuA.getGyroZ();
   }
   if (!got_any) {
+    s_imu_a_had_data = false;
+    s_imu_a_consec_fail++;
+    uint32_t now_ms = millis();
+#if DEBUG_IMU_A_NO_EVENT
+    if (s_imu_a_consec_fail == 1) {
+      Serial.println(F("DEBUG: IMU A — no new sensor event (getSensorEvent false; printed orientation may freeze)"));
+      s_imu_a_last_stall_warn_ms = now_ms;
+    } else if (now_ms - s_imu_a_last_stall_warn_ms >= 500U) {
+      s_imu_a_last_stall_warn_ms = now_ms;
+      Serial.print(F("DEBUG: IMU A — still no events, failed read count="));
+      Serial.println(s_imu_a_consec_fail);
+    }
+#endif
+#if IMU_A_AUTO_RECOVER
+    if (s_imu_a_consec_fail >= IMU_A_STALL_RECOVER_AFTER_FAIL) {
+      if (now_ms - s_imu_a_last_recover_ms >= IMU_A_RECOVER_COOLDOWN_MS) {
+        s_imu_a_last_recover_ms = now_ms;
+        s_imu_a_consec_fail = 0;
+        Serial.println(F("DEBUG: IMU A — auto-recover: re-running sensor_init() (I2C + IMU reset)"));
+        if (sensor_init()) {
+          Serial.println(F("DEBUG: IMU A — auto-recover: sensor_init OK"));
+        } else {
+          Serial.println(F("DEBUG: IMU A — auto-recover: sensor_init FAILED (will retry after cooldown)"));
+        }
+      }
+    }
+#endif
     *axis_rad = last_axis_val;
     return false;
   }
+#if DEBUG_IMU_A_NO_EVENT
+  if (s_imu_a_consec_fail > 0) {
+    Serial.print(F("DEBUG: IMU A — events resumed after "));
+    Serial.print(s_imu_a_consec_fail);
+    Serial.println(F(" failed read(s)"));
+    s_imu_a_consec_fail = 0;
+  }
+#endif
+  s_imu_a_had_data = true;
   switch (AXIS_FOR_CONTROL) {
     case AXIS_ROLL:  last_axis_val = rollA_rad;  break;
     case AXIS_PITCH: last_axis_val = pitchA_rad; break;
@@ -218,6 +289,11 @@ void sensor_getImuA_EulerDeg(float* yaw_deg, float* pitch_deg, float* roll_deg) 
 
 // Read IMU B; updates display and control axis. Returns true if new data.
 bool sensor_readControlAxis(float* axis_rad) {
+#if !USE_IMU_B
+  mirrorImuAtoImuB();
+  *axis_rad = last_control_axis_rad;
+  return s_imu_a_had_data;
+#else
   if (!imuB.dataAvailable()) {
     *axis_rad = last_control_axis_rad;
     return false;
@@ -242,6 +318,7 @@ bool sensor_readControlAxis(float* axis_rad) {
   }
   *axis_rad = last_control_axis_rad;
   return true;
+#endif
 }
 
 void sensor_readImuB(void) {

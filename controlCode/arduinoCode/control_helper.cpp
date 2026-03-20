@@ -36,30 +36,30 @@ static const float IK_MAX_TORQUE = 2.0f;
 #define LQR_COMPUTE_K_AT_INIT 1
 #if LQR_COMPUTE_K_AT_INIT
 // Plant (match compute_lqr_lookup.m): mass [kg], gravity, CoM height [m], inertias [kg·m^2], damping [N·m·s].
-// Use LQR_PLANT_H_CM to avoid conflict with LQR_H_CM macro in control_lqr_lookup.h
-// Total mass of platform + rider [kg]. Used in tilt dynamics: restoring torque = M*g*H*sin(angle).
-static const float LQR_M_ASSY   = 45.0f;
-// Gravitational acceleration [m/s^2].
-static const float LQR_G        = 9.81f;
-// Combined center-of-mass height above pivot (ball center) [m]. Heavy transmission near ball pulls H_CM down.
-static const float LQR_PLANT_H_CM = 0.32f;
-// Rotational inertia about roll axis (X) [kg·m^2]. Larger J = slower angular response.
-static const float LQR_J_ROLL   = 31.0f;
-// Rotational inertia about pitch axis (Y) [kg·m^2].
-static const float LQR_J_PITCH  = 31.0f;
-// Rotational inertia about yaw axis (Z) [kg·m^2].
-static const float LQR_J_YAW    = 6.0f;
-// Viscous damping on roll rate [N·m·s]. Opposes omega_roll in the plant dynamics.
+// Mutable so USE_POT_TUNE_PLANT / USE_POT_TUNE_LQR can override at runtime.
+static float LQR_M_ASSY   = 45.0f;
+static const float LQR_G  = 9.81f;
+static float LQR_PLANT_H_CM = 0.32f;
+static float LQR_PLANT_X_CM = 0.0f;   // CoM offset along roll axis [m]; positive = toward the side that goes UP when roll is positive
+static float LQR_J_ROLL   = 32.0f;
+static float LQR_J_PITCH  = 32.0f;
+static float LQR_J_YAW    = 6.0f;
 static const float LQR_B_ROLL   = 0.5f;
-// Viscous damping on pitch rate [N·m·s].
 static const float LQR_B_PITCH  = 0.5f;
-// Viscous damping on yaw rate [N·m·s].
 static const float LQR_B_YAW    = 0.3f;
-// Q diagonal [roll, pitch, yaw, omega_roll, omega_pitch, omega_yaw], R diagonal [tau_roll, tau_pitch, tau_yaw].
-static const float LQR_Q[6] = { 500.0f, 500.0f, 100.0f, 100.0f, 100.0f, 500.0f };
-static const float LQR_R[3] = { 0.08f, 0.08f, 0.08f };
+static float LQR_Q[6] = { 600.0f, 600.0f, 200.0f, 200.0f, 200.0f, 100.0f };
+static float LQR_R[3] = { 0.07f, 0.07f, 0.07f };
 static float K_computed[3][6];
 static uint8_t K_computed_valid = 0;
+// Thresholds for "changed enough to recompute K" (avoids CARE every tick).
+static const float PLANT_CHANGE_M = 0.5f;
+static const float PLANT_CHANGE_J = 0.5f;
+static const float PLANT_CHANGE_H = 0.01f;
+static const float PLANT_CHANGE_X = 0.005f;
+static float last_plant_M = 0.0f, last_plant_J_roll = 0.0f, last_plant_J_pitch = 0.0f, last_plant_H = 0.0f, last_plant_X = 0.0f;
+static uint8_t plant_last_valid = 0;
+static float last_q_angle = 0.0f, last_q_rate = 0.0f, last_r = 0.0f;
+static uint8_t lqr_weights_last_valid = 0;
 #endif
 
 // Runtime velocity scale and max from config (VEL_SCALE, VEL_MAX); updated by control_setVelScaleAndMax().
@@ -90,10 +90,14 @@ static float STICTION_CORRECTION_MAX = 3.0f;   // max additive correction per mo
 static float stiction_integral[3] = { 0.0f, 0.0f, 0.0f };
 static float stiction_prev_error[3] = { 0.0f, 0.0f, 0.0f };
 
-// ----- Inner velocity PID (one set for all motors). Gains from config.h (INNER_VEL_KP, KI, KD, I_MAX). -----
+// ----- Inner velocity PID (one set for all motors). Gains from config or runtime (USE_POT_TUNE_INNER). -----
 static float inner_vel_integral[3] = { 0.0f, 0.0f, 0.0f };
 static float inner_vel_prev_error[3] = { 0.0f, 0.0f, 0.0f };
 static float inner_vel_max = 10.0f;  // clamp output to ±this (rev/s); set from g_vel_max_lqr in updateLQR path
+static float inner_runtime_kp_high = INNER_VEL_KP_HIGH;
+static float inner_runtime_kp      = INNER_VEL_KP;
+static float inner_runtime_ki      = INNER_VEL_KI;
+static float inner_runtime_kd      = INNER_VEL_KD;
 
 // Gain [vel/rad]: angle error -> velocity. Tune for your system.
 static const float K_ROLL  = 1.0f;
@@ -175,9 +179,10 @@ static int lyap_solve(const float A[6][6], const float C[6][6], float X[6][6]) {
 
 // One-time CARE: Newton (Kleinman) iteration. Returns 1 on success.
 static int care_solve_once(float K_out[3][6]) {
-  float H_eff = LQR_PLANT_H_CM;
-  float g_roll  = LQR_M_ASSY * LQR_G * H_eff / LQR_J_ROLL;
-  float g_pitch = LQR_M_ASSY * LQR_G * H_eff / LQR_J_PITCH;
+  float H_eff_roll  = LQR_PLANT_H_CM + LQR_PLANT_X_CM;  // CoM offset along roll axis: positive = toward side that goes up for positive roll
+  float H_eff_pitch = LQR_PLANT_H_CM;
+  float g_roll  = LQR_M_ASSY * LQR_G * H_eff_roll / LQR_J_ROLL;
+  float g_pitch = LQR_M_ASSY * LQR_G * H_eff_pitch / LQR_J_PITCH;
   float A[6][6] = {
     { 0, 0, 0, 1, 0, 0 },
     { 0, 0, 0, 0, 1, 0 },
@@ -490,7 +495,18 @@ void control_innerVelocityPI(const float v_des[3], const float v_act[3], float d
     if (inner_vel_integral[i] < -INNER_VEL_I_MAX) inner_vel_integral[i] = -INNER_VEL_I_MAX;
     float d_term = (e_eff - inner_vel_prev_error[i]) / dt_s;
     inner_vel_prev_error[i] = e_eff;
-    float u = v_des[i] + INNER_VEL_KP * e_eff + INNER_VEL_KI * inner_vel_integral[i] + INNER_VEL_KD * d_term;
+    // Nonlinear KP: piecewise linear — high gain at small |e|, base gain at large |e|.
+    float abs_e = fabsf(e_eff);
+    float kp_eff;
+    if (abs_e <= INNER_VEL_KP_E_SMALL) {
+      kp_eff = inner_runtime_kp_high;
+    } else if (abs_e >= INNER_VEL_KP_E_LARGE) {
+      kp_eff = inner_runtime_kp;
+    } else {
+      float t = (abs_e - INNER_VEL_KP_E_SMALL) / (INNER_VEL_KP_E_LARGE - INNER_VEL_KP_E_SMALL);
+      kp_eff = inner_runtime_kp_high + t * (inner_runtime_kp - inner_runtime_kp_high);
+    }
+    float u = v_des[i] + kp_eff * e_eff + inner_runtime_ki * inner_vel_integral[i] + inner_runtime_kd * d_term;
     if (u > inner_vel_max) u = inner_vel_max;
     if (u < -inner_vel_max) u = -inner_vel_max;
     v_out[i] = u;
@@ -499,6 +515,102 @@ void control_innerVelocityPI(const float v_des[3], const float v_act[3], float d
 
 void control_setInnerVelMax(float vel_max) {
   if (vel_max >= 0.0f) inner_vel_max = vel_max;
+}
+
+#if LQR_COMPUTE_K_AT_INIT
+void control_setPlantParams(float M, float J_roll, float J_pitch, float H_cm, float x_cm_forward) {
+  LQR_M_ASSY = M;
+  LQR_J_ROLL = J_roll;
+  LQR_J_PITCH = J_pitch;
+  LQR_PLANT_H_CM = H_cm;
+  LQR_PLANT_X_CM = x_cm_forward;
+  int need_recompute = 0;
+  if (!plant_last_valid) need_recompute = 1;
+  else {
+    if (fabsf(M - last_plant_M) > PLANT_CHANGE_M) need_recompute = 1;
+    if (fabsf(J_roll - last_plant_J_roll) > PLANT_CHANGE_J) need_recompute = 1;
+    if (fabsf(J_pitch - last_plant_J_pitch) > PLANT_CHANGE_J) need_recompute = 1;
+    if (fabsf(H_cm - last_plant_H) > PLANT_CHANGE_H) need_recompute = 1;
+    if (fabsf(x_cm_forward - last_plant_X) > PLANT_CHANGE_X) need_recompute = 1;
+  }
+  if (need_recompute && care_solve_once(K_computed)) {
+    K_computed_valid = 1;
+    last_plant_M = M;
+    last_plant_J_roll = J_roll;
+    last_plant_J_pitch = J_pitch;
+    last_plant_H = H_cm;
+    last_plant_X = x_cm_forward;
+    plant_last_valid = 1;
+  }
+}
+
+void control_setLQRWeights(float q_angle, float q_rate, float r_torque) {
+  LQR_Q[0] = LQR_Q[1] = q_angle;
+  LQR_Q[2] = q_rate;
+  LQR_Q[3] = LQR_Q[4] = LQR_Q[5] = q_rate;
+  LQR_R[0] = LQR_R[1] = LQR_R[2] = r_torque;
+  int need_recompute = 0;
+  if (!lqr_weights_last_valid) need_recompute = 1;
+  else {
+    if (fabsf(q_angle - last_q_angle) > 5.0f) need_recompute = 1;
+    if (fabsf(q_rate - last_q_rate) > 5.0f) need_recompute = 1;
+    if (fabsf(r_torque - last_r) > 0.005f) need_recompute = 1;
+  }
+  if (need_recompute && care_solve_once(K_computed)) {
+    K_computed_valid = 1;
+    last_q_angle = q_angle;
+    last_q_rate = q_rate;
+    last_r = r_torque;
+    lqr_weights_last_valid = 1;
+  }
+}
+#else
+void control_setPlantParams(float M, float J_roll, float J_pitch, float H_cm, float x_cm_forward) { (void)M; (void)J_roll; (void)J_pitch; (void)H_cm; (void)x_cm_forward; }
+void control_setLQRWeights(float q_angle, float q_rate, float r_torque) { (void)q_angle; (void)q_rate; (void)r_torque; }
+#endif
+
+void control_setInnerPIDGains(float kp_high, float kp_base, float ki, float kd) {
+  if (kp_high >= 0.0f) inner_runtime_kp_high = kp_high;
+  if (kp_base >= 0.0f) inner_runtime_kp = kp_base;
+  if (ki >= 0.0f) inner_runtime_ki = ki;
+  if (kd >= 0.0f) inner_runtime_kd = kd;
+}
+
+#if LQR_COMPUTE_K_AT_INIT
+void control_getPlantParams(float* M, float* J_roll, float* J_pitch, float* H_cm, float* x_cm) {
+  if (M) *M = LQR_M_ASSY;
+  if (J_roll) *J_roll = LQR_J_ROLL;
+  if (J_pitch) *J_pitch = LQR_J_PITCH;
+  if (H_cm) *H_cm = LQR_PLANT_H_CM;
+  if (x_cm) *x_cm = LQR_PLANT_X_CM;
+}
+
+void control_getLQRWeights(float* q_angle, float* q_rate, float* r_torque) {
+  if (q_angle) *q_angle = LQR_Q[0];
+  if (q_rate) *q_rate = LQR_Q[3];
+  if (r_torque) *r_torque = LQR_R[0];
+}
+#else
+void control_getPlantParams(float* M, float* J_roll, float* J_pitch, float* H_cm, float* x_cm) {
+  if (M) *M = 45.0f;
+  if (J_roll) *J_roll = 32.0f;
+  if (J_pitch) *J_pitch = 32.0f;
+  if (H_cm) *H_cm = 0.32f;
+  if (x_cm) *x_cm = 0.0f;
+}
+
+void control_getLQRWeights(float* q_angle, float* q_rate, float* r_torque) {
+  if (q_angle) *q_angle = 600.0f;
+  if (q_rate) *q_rate = 200.0f;
+  if (r_torque) *r_torque = 0.07f;
+}
+#endif
+
+void control_getInnerPIDGains(float* kp_high, float* kp_base, float* ki, float* kd) {
+  if (kp_high) *kp_high = inner_runtime_kp_high;
+  if (kp_base) *kp_base = inner_runtime_kp;
+  if (ki) *ki = inner_runtime_ki;
+  if (kd) *kd = inner_runtime_kd;
 }
 
 void control_setStictionGains(float kp, float ki, float kd, float deadband, float i_max, float corr_max) {

@@ -5,6 +5,11 @@
 #include "config.h"
 
 #define SERIAL_PRINT_INTERVAL_MS  50
+#define TUNE_PRINT_INTERVAL_MS    1000U  // Print pot tuning values to serial every 1s when any USE_POT_TUNE_* is 1
+
+// Software reset test: 1 = reset every 30s to re-run setup()/init; 0 = disabled.
+#define ENABLE_SOFTWARE_RESET_TEST  0
+#define SOFT_RESET_TEST_INTERVAL_MS  30000U
 
 // Minimum velocity magnitude to overcome stiction per motor (small non-zero commands snapped to ±min).
 #define STICTION_MIN_V1    0.0f
@@ -48,6 +53,21 @@ static float applyManualStiction(float v_cmd, float min_mag) {
   return v_cmd;
 }
 
+#if USE_POT_TUNE_PLANT || USE_POT_TUNE_LQR || USE_POT_TUNE_INNER
+// Returns normalized 0..1 from potentiometer (deadzone at low end).
+static float readPotTune(int pin, int deadzone, float analog_max) {
+  int raw = analogRead(pin);
+  if (raw <= deadzone) return 0.0f;
+  if (raw >= (int)analog_max) return 1.0f;
+  return (float)(raw - deadzone) / (analog_max - (float)deadzone);
+}
+static float lerpf(float lo, float hi, float t) {
+  if (t <= 0.0f) return lo;
+  if (t >= 1.0f) return hi;
+  return lo + t * (hi - lo);
+}
+#endif
+
 static void printHeader(void) {
   Serial.println("IMU_A: Roll   Pitch  Yaw   | omega_R   omega_P   omega_Y (rad/s) | tau_R   tau_P   tau_Y  | n0 n1 n2  | v1    v2    v3 (rev/s) | v1_des v2_des v3_des | e1    e2    e3  | p1    p2    p3 (rev)");
 }
@@ -79,23 +99,66 @@ static void printRow(float rollA, float pitchA, float yawA, float omega_r, float
   Serial.println(p3, 4);
 }
 
+#if ENABLE_RESET_BUTTON
+// Call repeatedly from setup() retry loops so the button can trigger reset when stuck.
+static void checkResetButton(void) {
+  static uint32_t low_since = 0;
+  if (digitalRead(RESET_BUTTON_PIN) == LOW) {
+    if (low_since == 0)
+      low_since = millis();
+    else if (millis() - low_since >= 30) {
+      Serial.println("Reset button pressed — software reset");
+      Serial.flush();
+      (*(volatile uint32_t *)0xE000ED0C) = 0x05FA0004;
+      for (;;) { }
+    }
+  } else {
+    low_since = 0;
+  }
+}
+#endif
+
 void setup() {
+#if ENABLE_RESET_BUTTON
+  pinMode(RESET_BUTTON_PIN, INPUT_PULLUP);
+#endif
   Serial.begin(115200);
   for (int i = 0; i < 30 && !Serial; ++i) delay(100);
   delay(200);
 
   Serial.println("=== LQR + motor velocity PI (sensor -> control -> motor) ===");
 
+  // After software reset, give I2C and IMUs time to be ready.
+  delay(400);
+
   while (!sensor_init()) {
+#if USE_IMU_B
     Serial.println("Sensor init failed (IMU A or B not found), retrying in 1s...");
-    delay(1000);
+#else
+    Serial.println("Sensor init failed (IMU A not found), retrying in 1s...");
+#endif
+    for (uint32_t t = millis(); millis() - t < 1000; ) {
+#if ENABLE_RESET_BUTTON
+      checkResetButton();
+#endif
+      delay(50);
+    }
   }
+#if USE_IMU_B
   Serial.println("IMU A and B OK");
+#else
+  Serial.println("IMU A OK (USE_IMU_B=0: IMU B skipped, control axis = IMU A)");
+#endif
 
   sensor_calibrateZero();
   float rz, pz, yz;
   sensor_getEulerZeroRad(&rz, &pz, &yz);
-  Serial.print("IMU B zero (rad) roll="); Serial.print(rz, 4);
+#if USE_IMU_B
+  Serial.print("IMU B zero (rad) roll=");
+#else
+  Serial.print("Euler zero / IMU B mirror (rad) roll=");
+#endif
+  Serial.print(rz, 4);
   Serial.print(" pitch="); Serial.print(pz, 4);
   Serial.print(" yaw="); Serial.println(yz, 4);
   sensor_getPlatformZeroRad(&rz, &pz, &yz);
@@ -105,7 +168,12 @@ void setup() {
 
   if (!motor_init()) {
     Serial.println("Motor init failed");
-    while (true) delay(100);
+    while (true) {
+#if ENABLE_RESET_BUTTON
+      checkResetButton();
+#endif
+      delay(100);
+    }
   }
 
   Serial.println("Listening for ODrive heartbeats 1.5s...");
@@ -131,10 +199,44 @@ void setup() {
 #endif
   Serial.println("Platform: IMU A. Roll/pitch swap: ON.");
   printHeader();
+
+#if ENABLE_RESET_BUTTON
+  Serial.print("Reset button on pin ");
+  Serial.println(RESET_BUTTON_PIN);
+#endif
 }
 
 void loop() {
   motor_pumpEvents();
+
+#if ENABLE_RESET_BUTTON
+  {
+    static uint32_t reset_btn_low_since = 0;
+    if (digitalRead(RESET_BUTTON_PIN) == LOW) {
+      if (reset_btn_low_since == 0)
+        reset_btn_low_since = millis();
+      else if (millis() - reset_btn_low_since >= 30) {
+        Serial.println("Reset button pressed — software reset");
+        Serial.flush();
+        (*(volatile uint32_t *)0xE000ED0C) = 0x05FA0004;
+        for (;;) { }
+      }
+    } else {
+      reset_btn_low_since = 0;
+    }
+  }
+#endif
+
+#if ENABLE_SOFTWARE_RESET_TEST
+  if (millis() >= SOFT_RESET_TEST_INTERVAL_MS) {
+    Serial.println("Software reset (30s test)...");
+    Serial.flush();
+    // ARM Cortex-M7 system reset (Teensy 4.1)
+    (*(volatile uint32_t *)0xE000ED0C) = 0x05FA0004;
+    for (;;) { }
+  }
+#endif
+
   static uint32_t last_print = 0;
 
 #if USE_POT_TORQUE
@@ -245,6 +347,38 @@ void loop() {
     float tmp_omega = x[3]; x[3] = x[4]; x[4] = tmp_omega;
     float tmp_ref = x_ref[0]; x_ref[0] = x_ref[1]; x_ref[1] = tmp_ref;
     x[1] = -x[1]; x[4] = -x[4];
+
+#if USE_POT_TUNE_PLANT
+    {
+      float t1 = readPotTune(POT_TUNE_PIN_PLANT, POT_TUNE_DEADZONE, POT_TUNE_ANALOG_MAX);
+      control_setPlantParams(
+          lerpf(POT_TUNE_PLANT_M_MIN,  POT_TUNE_PLANT_M_MAX,  t1),
+          lerpf(POT_TUNE_PLANT_J_MIN,  POT_TUNE_PLANT_J_MAX,  t1),
+          lerpf(POT_TUNE_PLANT_J_MIN,  POT_TUNE_PLANT_J_MAX,  t1),
+          lerpf(POT_TUNE_PLANT_H_MIN,  POT_TUNE_PLANT_H_MAX,  t1),
+          lerpf(POT_TUNE_PLANT_X_MIN,  POT_TUNE_PLANT_X_MAX,  t1));
+    }
+#endif
+#if USE_POT_TUNE_LQR
+    {
+      float t2 = readPotTune(POT_TUNE_PIN_LQR, POT_TUNE_DEADZONE, POT_TUNE_ANALOG_MAX);
+      control_setLQRWeights(
+          lerpf(POT_TUNE_LQR_Q_ANGLE_MIN, POT_TUNE_LQR_Q_ANGLE_MAX, t2),
+          lerpf(POT_TUNE_LQR_Q_RATE_MIN,  POT_TUNE_LQR_Q_RATE_MAX,  t2),
+          lerpf(POT_TUNE_LQR_R_MAX, POT_TUNE_LQR_R_MIN, t2));  // high pot = low R = more aggressive
+    }
+#endif
+#if USE_POT_TUNE_INNER
+    {
+      float t3 = readPotTune(POT_TUNE_PIN_INNER, POT_TUNE_DEADZONE, POT_TUNE_ANALOG_MAX);
+      control_setInnerPIDGains(
+          lerpf(POT_TUNE_INNER_KP_HIGH_MIN, POT_TUNE_INNER_KP_HIGH_MAX, t3),
+          lerpf(POT_TUNE_INNER_KP_MIN,      POT_TUNE_INNER_KP_MAX,      t3),
+          lerpf(POT_TUNE_INNER_KI_MIN,      POT_TUNE_INNER_KI_MAX,      t3),
+          lerpf(POT_TUNE_INNER_KD_MIN,      POT_TUNE_INNER_KD_MAX,      t3));
+    }
+#endif
+
     float tau_roll, tau_pitch, tau_yaw;
     control_updateLQR(x, x_ref, &v_des[0], &v_des[1], &v_des[2], &tau_roll, &tau_pitch, &tau_yaw);
     last_tau_roll = tau_roll; last_tau_pitch = tau_pitch; last_tau_yaw = tau_yaw;
@@ -289,5 +423,35 @@ void loop() {
              v_des[0], v_des[1], v_des[2],
              last_e1, last_e2, last_e3, last_p1, last_p2, last_p3);
   }
+
+#if (USE_POT_TUNE_PLANT || USE_POT_TUNE_LQR || USE_POT_TUNE_INNER)
+  {
+    static uint32_t last_tune_print = 0;
+    if (millis() - last_tune_print >= TUNE_PRINT_INTERVAL_MS) {
+      last_tune_print = millis();
+      float M, Jr, Jp, H, Xcm, qa, qr, r, kph, kpb, ki, kd;
+      control_getPlantParams(&M, &Jr, &Jp, &H, &Xcm);
+      control_getLQRWeights(&qa, &qr, &r);
+      control_getInnerPIDGains(&kph, &kpb, &ki, &kd);
+      Serial.print("TUNE ");
+#if USE_POT_TUNE_PLANT
+      Serial.print("M="); Serial.print(M, 1); Serial.print(" J="); Serial.print(Jr, 1); Serial.print(" H="); Serial.print(H, 2); Serial.print(" X="); Serial.print(Xcm, 3);
+#endif
+#if USE_POT_TUNE_PLANT && (USE_POT_TUNE_LQR || USE_POT_TUNE_INNER)
+      Serial.print(" | ");
+#endif
+#if USE_POT_TUNE_LQR
+      Serial.print("Qa="); Serial.print(qa, 0); Serial.print(" Qr="); Serial.print(qr, 0); Serial.print(" R="); Serial.print(r, 3);
+#endif
+#if USE_POT_TUNE_LQR && USE_POT_TUNE_INNER
+      Serial.print(" | ");
+#endif
+#if USE_POT_TUNE_INNER
+      Serial.print("KPh="); Serial.print(kph, 2); Serial.print(" KP="); Serial.print(kpb, 2); Serial.print(" KI="); Serial.print(ki, 2); Serial.print(" KD="); Serial.print(kd, 2);
+#endif
+      Serial.println();
+    }
+  }
+#endif
 #endif
 }
