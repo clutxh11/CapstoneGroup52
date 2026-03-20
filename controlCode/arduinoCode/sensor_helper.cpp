@@ -86,12 +86,17 @@ static void mirrorImuAtoImuB(void) {
 }
 #endif
 
+void sensor_release_bus_for_retry(void) {
+  Wire2.end();
+  delay(500);  // Long bus-off so BNO08x can timeout and clear stuck SH-2 state
+}
+
 bool sensor_init(void) {
   Wire2.end();
-  delay(100);
+  delay(200);
   Wire2.begin();
   Wire2.setClock(400000);
-  delay(50);
+  delay(150);  // Let bus and IMU settle before first transaction
 
   if (!imuA.begin(IMU_A_ADDR, Wire2)) {
     return false;

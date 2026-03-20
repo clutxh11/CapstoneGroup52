@@ -42,7 +42,7 @@
 #define USE_IMU_B  0
 
 // 1 = print when IMU A stops returning new packets (getSensorEvent false) and when it recovers — use to diagnose frozen orientation.
-#define DEBUG_IMU_A_NO_EVENT  1
+#define DEBUG_IMU_A_NO_EVENT  0
 
 // 1 = after sustained stall, call sensor_init() to reset I2C + IMU(s) (helps recover from I2C/sensor lockup without power cycle).
 #define IMU_A_AUTO_RECOVER           1

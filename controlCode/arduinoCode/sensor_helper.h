@@ -8,6 +8,9 @@
 // Initialize I2C and both IMUs. Returns true on success.
 bool sensor_init(void);
 
+// Release I2C bus before retrying init (call after sensor_init() fails). Gives IMU time to clear stuck state.
+void sensor_release_bus_for_retry(void);
+
 // Run calibration: average IMU B roll, pitch, yaw over ~1.2s. Call once after init (hold user/IMU B at rest).
 void sensor_calibrateZero(void);
 

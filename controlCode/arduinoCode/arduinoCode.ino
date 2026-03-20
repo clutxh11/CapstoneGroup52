@@ -133,11 +133,12 @@ void setup() {
 
   while (!sensor_init()) {
 #if USE_IMU_B
-    Serial.println("Sensor init failed (IMU A or B not found), retrying in 1s...");
+    Serial.println("Sensor init failed (IMU A or B not found), retrying in 2s...");
 #else
-    Serial.println("Sensor init failed (IMU A not found), retrying in 1s...");
+    Serial.println("Sensor init failed (IMU A not found), retrying in 2s...");
 #endif
-    for (uint32_t t = millis(); millis() - t < 1000; ) {
+    sensor_release_bus_for_retry();  // Release I2C so BNO08x can clear stuck state
+    for (uint32_t t = millis(); millis() - t < 2000; ) {
 #if ENABLE_RESET_BUTTON
       checkResetButton();
 #endif
