@@ -30,8 +30,8 @@
 #define ORIENTATION_DEADBAND_DEG  0.3f
 
 // Loop rates [Hz]. Inner must be >= outer; inner runs encoder + velocity PI + motor command, outer runs IMU + LQR and updates v_des.
-#define OUTER_LOOP_HZ  400
-#define INNER_LOOP_HZ  800
+#define OUTER_LOOP_HZ  100
+#define INNER_LOOP_HZ  200
 
 // Orientation torque toggles (normal LQR / PID outer and pot-torque mode). 1 = use that axis; 0 = zero torque on that axis (platform does not balance that axis).
 #define ENABLE_LQR_ROLL   1

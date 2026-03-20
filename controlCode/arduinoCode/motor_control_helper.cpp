@@ -19,7 +19,7 @@ struct ODriveStatus; // Teensy compile hack
 #define ODRV2_NODE_ID  2
 #define HEARTBEAT_TIMEOUT_MS 500
 #define SENTINEL_NO_SEND -99.0f
-#define ENCODER_REQUEST_TIMEOUT_MS 2
+#define ENCODER_REQUEST_TIMEOUT_MS 0
 // First-order LPF time constant for encoder vel/pos [s]. Larger = smoother, more lag.
 #define ENCODER_LPF_TAU_S 0.03f
 

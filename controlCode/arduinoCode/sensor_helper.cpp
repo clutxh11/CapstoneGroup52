@@ -103,10 +103,10 @@ bool sensor_init(void) {
   if (!imuA.begin(IMU_A_ADDR, Wire2)) {
     return false;
   }
-  if (!imuA.enableRotationVector(50)) {
+  if (!imuA.enableRotationVector(10)) {
     return false;
   }
-  if (!imuA.enableGyro(50)) {
+  if (!imuA.enableGyro(10)) {
     return false;
   }
   delay(100);
